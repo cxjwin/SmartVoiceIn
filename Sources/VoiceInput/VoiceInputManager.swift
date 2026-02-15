@@ -516,27 +516,20 @@ class VoiceInputManager: NSObject {
         return wavData
     }
 
-    /// 清理文本，去除填充词、重复词等
-    private static func cleanText(_ text: String) -> String {
+    /// 清理文本，去除语气词和明显重复。
+    /// - parameter aggressive: `true` 时也会清理“然后/就是/这个”等口头禅；`false` 仅清理高置信语气词（如“呃/嗯/uh”）
+    private static func cleanText(_ text: String, aggressive: Bool = true) -> String {
         var result = text
 
-        let fillers = [
-            "那个", "然后", "就是", "其实", "这个",
+        let lightFillers = [
             "嗯嗯", "嗯啊", "啊嗯", "啊啊", "嗯呢",
-            "嗯", "啊", "呀", "哦", "额", "呃", "uh", "um", "ah"
+            "嗯", "啊", "呀", "哦", "额", "呃", "唔",
+            "uh", "um", "ah"
         ]
+        let aggressiveOnlyFillers = ["那个", "然后", "就是", "其实", "这个"]
+        let fillers = aggressive ? (lightFillers + aggressiveOnlyFillers) : lightFillers
 
-        for filler in fillers {
-            let pattern = "\\b\(filler)\\b"
-            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
-                result = regex.stringByReplacingMatches(
-                    in: result,
-                    options: [],
-                    range: NSRange(result.startIndex..., in: result),
-                    withTemplate: ""
-                )
-            }
-        }
+        result = removeStandaloneFillers(result, fillers: fillers)
 
         if let regex = try? NSRegularExpression(pattern: "(.)\\1{2,}", options: []) {
             result = regex.stringByReplacingMatches(
@@ -547,14 +540,7 @@ class VoiceInputManager: NSObject {
             )
         }
 
-        if let regex = try? NSRegularExpression(pattern: "\\s+", options: []) {
-            result = regex.stringByReplacingMatches(
-                in: result,
-                options: [],
-                range: NSRange(result.startIndex..., in: result),
-                withTemplate: " "
-            )
-        }
+        result = normalizePunctuationAndWhitespace(result)
 
         result = result.trimmingCharacters(in: .whitespacesAndNewlines)
         let punctuationToRemove = ["...", "。", "，", "、", "；", "：", "？", "！"]
@@ -570,6 +556,82 @@ class VoiceInputManager: NSObject {
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static func removeStandaloneFillers(_ text: String, fillers: [String]) -> String {
+        guard !fillers.isEmpty else {
+            return text
+        }
+
+        let escaped = fillers.map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|")
+        let separators = "\\s,，。！？!?：:；;、()（）\\[\\]【】\"“”'‘’"
+        let pattern = "(^|[\(separators)])(\(escaped))(?=($|[\(separators)]))"
+
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return text
+        }
+
+        var result = regex.stringByReplacingMatches(
+            in: text,
+            options: [],
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: "$1"
+        )
+
+        // 处理紧连的重复语气词，例如“呃呃”、“嗯嗯嗯”
+        let repeatedLightFillerPattern = "(?:呃|额|嗯|啊|哦|唔){2,}"
+        if let repeatedRegex = try? NSRegularExpression(pattern: repeatedLightFillerPattern, options: []) {
+            result = repeatedRegex.stringByReplacingMatches(
+                in: result,
+                options: [],
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: ""
+            )
+        }
+
+        return result
+    }
+
+    private static func normalizePunctuationAndWhitespace(_ text: String) -> String {
+        var result = text
+
+        if let regex = try? NSRegularExpression(pattern: "\\s+", options: []) {
+            result = regex.stringByReplacingMatches(
+                in: result,
+                options: [],
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: " "
+            )
+        }
+
+        if let regex = try? NSRegularExpression(pattern: "\\s*([，。！？；：、,.!?;:])\\s*", options: []) {
+            result = regex.stringByReplacingMatches(
+                in: result,
+                options: [],
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: "$1"
+            )
+        }
+
+        if let regex = try? NSRegularExpression(pattern: "([，、,.]){2,}", options: []) {
+            result = regex.stringByReplacingMatches(
+                in: result,
+                options: [],
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: "$1"
+            )
+        }
+
+        if let regex = try? NSRegularExpression(pattern: "([。！？!?]){2,}", options: []) {
+            result = regex.stringByReplacingMatches(
+                in: result,
+                options: [],
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: "$1"
+            )
+        }
+
+        return result
+    }
+
     /// 统一后处理：优先大模型，失败时回退本地清洗
     private func postProcessRecognizedText(_ text: String) {
         print("[SmartVoiceIn] Post-processing text started")
@@ -580,8 +642,12 @@ class VoiceInputManager: NSObject {
             llmTextOptimizer.optimize(text: text) { result in
                 switch result {
                 case .success(let optimized):
+                    let finalized = Self.cleanText(optimized, aggressive: false)
                     print("[SmartVoiceIn] LLM optimized text: \(optimized)")
-                    callback(.success(optimized))
+                    if finalized != optimized {
+                        print("[SmartVoiceIn] LLM post-cleaned text: \(finalized)")
+                    }
+                    callback(.success(finalized))
                 case .failure(let error):
                     print("[SmartVoiceIn] LLM optimization failed: \(error), fallback to local clean")
                     self.onStatusUpdate?("转换失败，正在回退本地清洗...")
