@@ -79,7 +79,7 @@ final class TencentASRProvider: ASRProvider, @unchecked Sendable {
             "SourceType": 1,  // 1 = 语音数据
             "Data": audioBase64,
             "DataLen": audioData.count,
-            "FilterModal": 1,  // 过滤语气词
+            "FilterModal": 0,  // 不在 ASR 层做文本过滤，统一交给 LLM
             "ChannelNum": max(channels, 1)
         ]
 
@@ -182,7 +182,7 @@ final class TencentASRProvider: ASRProvider, @unchecked Sendable {
                         if !trimmed.isEmpty {
                             relay.resolve(.success(trimmed))
                         } else {
-                            print("[TencentASR] Result is empty, audio may be unclear or format issue")
+                            AppLog.log("[TencentASR] Result is empty, audio may be unclear or format issue")
                             relay.resolve(.failure(NSError(domain: "TencentASR", code: -2, userInfo: [NSLocalizedDescriptionKey: "识别结果为空，可能是音频格式问题"])))
                         }
                         return
@@ -199,11 +199,11 @@ final class TencentASRProvider: ASRProvider, @unchecked Sendable {
                     }
 
                     // 其他情况
-                    print("[TencentASR] Response: \(response)")
+                    AppLog.log("[TencentASR] Response: \(response)")
                     relay.resolve(.failure(NSError(domain: "TencentASR", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法解析响应"])))
                 } else {
                     let responseString = String(data: data, encoding: .utf8) ?? "Unable to decode"
-                    print("[TencentASR] Response: \(responseString)")
+                    AppLog.log("[TencentASR] Response: \(responseString)")
                     relay.resolve(.failure(NSError(domain: "TencentASR", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法解析响应"])))
                 }
             } catch {

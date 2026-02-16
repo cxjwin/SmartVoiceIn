@@ -1,6 +1,7 @@
 import Cocoa
 import Speech
 import AVFoundation
+import UniformTypeIdentifiers
 
 @MainActor
 final class StatusHUD {
@@ -96,6 +97,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let badge: String
     }
 
+    private enum PromptTemplateEditorMode {
+        case create
+        case edit(templateID: String)
+    }
+
     private var statusItem: NSStatusItem!
     private var statusHUD: StatusHUD!
     private var currentASRProviderStatusItem: NSMenuItem?
@@ -113,7 +119,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var asrProviderMenuItems: [String: NSMenuItem] = [:]
     private var optimizeProviderMenuItems: [String: NSMenuItem] = [:]
+    private var promptTemplateMenuItems: [String: NSMenuItem] = [:]
+    private var promptTemplateSubmenu: NSMenu?
+    private var currentPromptTemplateStatusItem: NSMenuItem?
+    private var editCurrentPromptTemplateMenuItem: NSMenuItem?
+    private var deleteCurrentPromptTemplateMenuItem: NSMenuItem?
+    private var localLLMModelStatusItem: NSMenuItem?
     private var tencentCredentialStatusItem: NSMenuItem?
+    private var miniMaxCredentialStatusItem: NSMenuItem?
     private var statusHUDAutoHideWorkItem: DispatchWorkItem?
     private let asrProviderPresentations: [String: ASRProviderPresentation] = [
         "qwen3_local": ASRProviderPresentation(displayName: "Qwen3 本地模型", badge: "Q3"),
@@ -122,7 +135,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     ]
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
-        print("App launched!")  // 调试用
+        AppLog.log("App launched!")  // 调试用
 
         // 激活应用
         NSApp.activate(ignoringOtherApps: true)
@@ -133,10 +146,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupHotKey()
 
         // 不再自动请求权限，用户需要手动在系统设置中授权
-        print("请在系统设置中授予权限:")
-        print("1. 系统设置 → 隐私与安全性 → 辅助功能 → 添加 SmartVoiceIn")
-        print("2. 系统设置 → 隐私与安全性 → 麦克风 → 添加 SmartVoiceIn")
-        print("3. 系统设置 → 隐私与安全性 → 语音识别 → 添加 SmartVoiceIn")
+        AppLog.log("请在系统设置中授予权限:")
+        AppLog.log("1. 系统设置 → 隐私与安全性 → 辅助功能 → 添加 SmartVoiceIn")
+        AppLog.log("2. 系统设置 → 隐私与安全性 → 麦克风 → 添加 SmartVoiceIn")
+        AppLog.log("3. 系统设置 → 隐私与安全性 → 语音识别 → 添加 SmartVoiceIn")
     }
 
     private func setupMenuBar() {
@@ -198,9 +211,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async {
                     switch result {
                     case .success(let text):
-                        self?.insertText(text)
                         let providerName = self?.currentASRProviderDisplayName() ?? "未知引擎"
-                        self?.updateStatus("识别成功(\(providerName)): \(text)", autoHideAfter: 5)
+                        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !normalized.isEmpty else {
+                            self?.updateStatus("识别成功(\(providerName)): 无有效文本", autoHideAfter: 3)
+                            return
+                        }
+                        self?.insertText(normalized)
+                        self?.updateStatus("识别成功(\(providerName)): \(normalized)", autoHideAfter: 5)
                     case .failure(let error):
                         let providerName = self?.currentASRProviderDisplayName() ?? "未知引擎"
                         self?.updateStatus("识别失败(\(providerName)): \(error.localizedDescription)")
@@ -215,7 +233,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
         refreshASRProviderUI()
         refreshOptimizeProviderMenuState()
-        refreshTencentCredentialStatusUI()
+        refreshPromptTemplateMenuState()
+        refreshTextOptimizeCredentialStatusUI()
     }
 
     private func makeASRProviderMenuItem() -> NSMenuItem {
@@ -315,6 +334,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         submenu.addItem(NSMenuItem.separator())
+        submenu.addItem(makePromptTemplateMenuItem())
+        submenu.addItem(NSMenuItem.separator())
+
+        localLLMModelStatusItem = NSMenuItem(title: "本地模型: 未配置", action: nil, keyEquivalent: "")
+        localLLMModelStatusItem?.isEnabled = false
+        if let localLLMModelStatusItem {
+            submenu.addItem(localLLMModelStatusItem)
+        }
+
+        let localModelConfigItem = NSMenuItem(title: "设置本地模型...", action: #selector(openLocalLLMModelConfiguration), keyEquivalent: "")
+        localModelConfigItem.target = self
+        submenu.addItem(localModelConfigItem)
+
+        submenu.addItem(NSMenuItem.separator())
 
         tencentCredentialStatusItem = NSMenuItem(title: "腾讯云密钥: 未配置", action: nil, keyEquivalent: "")
         tencentCredentialStatusItem?.isEnabled = false
@@ -326,8 +359,87 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         configItem.target = self
         submenu.addItem(configItem)
 
+        submenu.addItem(NSMenuItem.separator())
+
+        miniMaxCredentialStatusItem = NSMenuItem(title: "MiniMax Key: 未配置", action: nil, keyEquivalent: "")
+        miniMaxCredentialStatusItem?.isEnabled = false
+        if let miniMaxCredentialStatusItem {
+            submenu.addItem(miniMaxCredentialStatusItem)
+        }
+
+        let miniMaxConfigItem = NSMenuItem(title: "设置 MiniMax API Key...", action: #selector(openMiniMaxCredentialConfiguration), keyEquivalent: "")
+        miniMaxConfigItem.target = self
+        submenu.addItem(miniMaxConfigItem)
+
         parent.submenu = submenu
         return parent
+    }
+
+    private func makePromptTemplateMenuItem() -> NSMenuItem {
+        let parent = NSMenuItem(title: "提示词模板", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        parent.submenu = submenu
+        promptTemplateSubmenu = submenu
+        reloadPromptTemplateMenu()
+        return parent
+    }
+
+    private func reloadPromptTemplateMenu() {
+        guard let submenu = promptTemplateSubmenu else {
+            return
+        }
+
+        submenu.removeAllItems()
+        promptTemplateMenuItems.removeAll()
+
+        let currentTemplate = LLMPromptTemplateStore.currentTemplate()
+        let currentItem = NSMenuItem(title: "当前模板: \(currentTemplate.title)", action: nil, keyEquivalent: "")
+        currentItem.isEnabled = false
+        currentPromptTemplateStatusItem = currentItem
+        submenu.addItem(currentItem)
+        submenu.addItem(NSMenuItem.separator())
+
+        let templates = LLMPromptTemplateStore.allTemplates()
+        let selectedTemplateID = LLMPromptTemplateStore.currentTemplateID()
+        for template in templates {
+            let item = NSMenuItem(title: promptTemplateDisplayTitle(template), action: #selector(selectPromptTemplate(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = template.id
+            item.state = (template.id == selectedTemplateID) ? .on : .off
+            promptTemplateMenuItems[template.id] = item
+            submenu.addItem(item)
+        }
+
+        submenu.addItem(NSMenuItem.separator())
+        let addTemplateItem = NSMenuItem(title: "新增模板...", action: #selector(openPromptTemplateConfiguration), keyEquivalent: "")
+        addTemplateItem.target = self
+        submenu.addItem(addTemplateItem)
+
+        editCurrentPromptTemplateMenuItem = NSMenuItem(title: "编辑当前模板...", action: #selector(openCurrentPromptTemplateEditor), keyEquivalent: "")
+        editCurrentPromptTemplateMenuItem?.target = self
+        if let editCurrentPromptTemplateMenuItem {
+            submenu.addItem(editCurrentPromptTemplateMenuItem)
+        }
+
+        deleteCurrentPromptTemplateMenuItem = NSMenuItem(title: "删除当前模板", action: #selector(deleteCurrentPromptTemplate), keyEquivalent: "")
+        deleteCurrentPromptTemplateMenuItem?.target = self
+        if let deleteCurrentPromptTemplateMenuItem {
+            submenu.addItem(deleteCurrentPromptTemplateMenuItem)
+        }
+
+        submenu.addItem(NSMenuItem.separator())
+
+        let exportTemplatesItem = NSMenuItem(title: "导出自定义模板...", action: #selector(exportPromptTemplates), keyEquivalent: "")
+        exportTemplatesItem.target = self
+        submenu.addItem(exportTemplatesItem)
+
+        let importTemplatesItem = NSMenuItem(title: "导入模板...", action: #selector(importPromptTemplates), keyEquivalent: "")
+        importTemplatesItem.target = self
+        submenu.addItem(importTemplatesItem)
+
+        let currentIsBuiltIn = currentTemplate.isBuiltIn
+        editCurrentPromptTemplateMenuItem?.isEnabled = !currentIsBuiltIn
+        deleteCurrentPromptTemplateMenuItem?.isEnabled = !currentIsBuiltIn
     }
 
     private func refreshOptimizeProviderMenuState() {
@@ -337,9 +449,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func refreshTencentCredentialStatusUI() {
+    private func refreshPromptTemplateMenuState() {
+        if promptTemplateSubmenu == nil || promptTemplateMenuItems.isEmpty {
+            reloadPromptTemplateMenu()
+            return
+        }
+
+        let currentTemplate = LLMPromptTemplateStore.currentTemplate()
+        currentPromptTemplateStatusItem?.title = "当前模板: \(currentTemplate.title)"
+        for (templateID, item) in promptTemplateMenuItems {
+            item.state = (templateID == currentTemplate.id) ? .on : .off
+        }
+        editCurrentPromptTemplateMenuItem?.isEnabled = !currentTemplate.isBuiltIn
+        deleteCurrentPromptTemplateMenuItem?.isEnabled = !currentTemplate.isBuiltIn
+    }
+
+    private func refreshTextOptimizeCredentialStatusUI() {
+        let localModelID = voiceInputManager?.currentLocalLLMModelIDValue() ?? "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+        localLLMModelStatusItem?.title = "本地模型: \(localModelID)"
         let configured = voiceInputManager?.hasTencentCredentialsConfigured() ?? false
         tencentCredentialStatusItem?.title = configured ? "腾讯云密钥: 已配置" : "腾讯云密钥: 未配置"
+        let miniMaxConfigured = voiceInputManager?.hasMiniMaxAPIKeyConfigured() ?? false
+        miniMaxCredentialStatusItem?.title = miniMaxConfigured ? "MiniMax Key: 已配置" : "MiniMax Key: 未配置"
         refreshASRProviderUI()
     }
 
@@ -361,11 +492,258 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         guard voiceInputManager.updateTextOptimizeProvider(rawValue: rawValue) else {
-            updateStatus("切换失败: 不支持的模型提供方")
+            updateStatus("切换失败: 提供方不可用或配置缺失")
             return
         }
         refreshOptimizeProviderMenuState()
         updateStatus("文本优化模型: \(displayName)")
+    }
+
+    @objc private func selectPromptTemplate(_ sender: NSMenuItem) {
+        guard let templateID = sender.representedObject as? String else {
+            updateStatus("切换失败: 无效的提示词模板")
+            return
+        }
+        guard LLMPromptTemplateStore.setCurrentTemplate(id: templateID) else {
+            updateStatus("切换失败: 未找到提示词模板")
+            return
+        }
+        refreshPromptTemplateMenuState()
+        updateStatus("提示词模板: \(LLMPromptTemplateStore.currentTemplate().title)")
+    }
+
+    @objc private func openPromptTemplateConfiguration() {
+        openPromptTemplateEditor(mode: .create)
+    }
+
+    @objc private func openCurrentPromptTemplateEditor() {
+        let currentTemplate = LLMPromptTemplateStore.currentTemplate()
+        guard !currentTemplate.isBuiltIn else {
+            updateStatus("内置模板不支持编辑，请通过“新增模板...”创建自定义模板")
+            return
+        }
+        openPromptTemplateEditor(mode: .edit(templateID: currentTemplate.id))
+    }
+
+    private func openPromptTemplateEditor(mode: PromptTemplateEditorMode) {
+        hotKeyManager?.setEnabled(false)
+        defer {
+            hotKeyManager?.setEnabled(true)
+        }
+
+        let initialTitle: String
+        let initialPrompt: String
+        let messageText: String
+        let informativeText: String
+        let confirmButtonTitle: String
+
+        switch mode {
+        case .create:
+            initialTitle = ""
+            initialPrompt = LLMPromptTemplateStore.defaultTemplatePrompt()
+            messageText = "新增提示词模板"
+            informativeText = "填写模板标题和 Prompt 内容，保存后可在“文本优化模型 -> 提示词模板”中切换。"
+            confirmButtonTitle = "保存并使用"
+        case .edit(let templateID):
+            guard let template = LLMPromptTemplateStore.template(withID: templateID), !template.isBuiltIn else {
+                updateStatus("编辑失败：模板不存在或不可编辑")
+                return
+            }
+            initialTitle = template.title
+            initialPrompt = template.prompt
+            messageText = "编辑提示词模板"
+            informativeText = "修改模板标题和 Prompt 内容，保存后会立即生效。"
+            confirmButtonTitle = "保存修改"
+        }
+
+        let alert = NSAlert()
+        alert.messageText = messageText
+        alert.informativeText = informativeText
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: confirmButtonTitle)
+        alert.addButton(withTitle: "取消")
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 240))
+        accessory.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleLabel = NSTextField(labelWithString: "模板标题")
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(titleLabel)
+
+        let titleField = NSTextField(string: initialTitle)
+        titleField.placeholderString = "例如：会议纪要清洗"
+        titleField.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(titleField)
+
+        let promptLabel = NSTextField(labelWithString: "Prompt 模板")
+        promptLabel.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(promptLabel)
+
+        let promptScrollView = NSScrollView()
+        promptScrollView.borderType = .bezelBorder
+        promptScrollView.hasVerticalScroller = true
+        promptScrollView.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(promptScrollView)
+
+        let promptTextView = NSTextView()
+        promptTextView.isRichText = false
+        promptTextView.isAutomaticQuoteSubstitutionEnabled = false
+        promptTextView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        promptTextView.string = initialPrompt
+        promptScrollView.documentView = promptTextView
+
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: accessory.topAnchor),
+            titleLabel.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
+            titleLabel.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+
+            titleField.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
+            titleField.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
+            titleField.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+
+            promptLabel.topAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 12),
+            promptLabel.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
+            promptLabel.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+
+            promptScrollView.topAnchor.constraint(equalTo: promptLabel.bottomAnchor, constant: 6),
+            promptScrollView.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
+            promptScrollView.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+            promptScrollView.heightAnchor.constraint(equalToConstant: 160),
+            promptScrollView.bottomAnchor.constraint(equalTo: accessory.bottomAnchor)
+        ])
+
+        alert.accessoryView = accessory
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            updateStatus("已取消模板操作")
+            return
+        }
+
+        let title = titleField.stringValue
+        let prompt = promptTextView.string
+
+        switch mode {
+        case .create:
+            guard let newTemplate = LLMPromptTemplateStore.addCustomTemplate(title: title, prompt: prompt) else {
+                updateStatus("保存失败：模板标题和 Prompt 不能为空")
+                return
+            }
+            _ = LLMPromptTemplateStore.setCurrentTemplate(id: newTemplate.id)
+            reloadPromptTemplateMenu()
+            refreshPromptTemplateMenuState()
+            updateStatus("提示词模板已新增并切换: \(newTemplate.title)")
+        case .edit(let templateID):
+            guard LLMPromptTemplateStore.updateCustomTemplate(id: templateID, title: title, prompt: prompt) else {
+                updateStatus("保存失败：模板标题和 Prompt 不能为空")
+                return
+            }
+            _ = LLMPromptTemplateStore.setCurrentTemplate(id: templateID)
+            reloadPromptTemplateMenu()
+            refreshPromptTemplateMenuState()
+            updateStatus("提示词模板已更新: \(title.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+    }
+
+    @objc private func deleteCurrentPromptTemplate() {
+        hotKeyManager?.setEnabled(false)
+        defer {
+            hotKeyManager?.setEnabled(true)
+        }
+
+        let currentTemplate = LLMPromptTemplateStore.currentTemplate()
+        guard !currentTemplate.isBuiltIn else {
+            updateStatus("内置模板不支持删除")
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "删除提示词模板"
+        alert.informativeText = "确认删除模板「\(currentTemplate.title)」？此操作不可恢复。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            updateStatus("已取消删除模板")
+            return
+        }
+
+        guard LLMPromptTemplateStore.deleteCustomTemplate(id: currentTemplate.id) else {
+            updateStatus("删除失败：模板不存在")
+            return
+        }
+        reloadPromptTemplateMenu()
+        refreshPromptTemplateMenuState()
+        updateStatus("提示词模板已删除: \(currentTemplate.title)")
+    }
+
+    @objc private func exportPromptTemplates() {
+        hotKeyManager?.setEnabled(false)
+        defer {
+            hotKeyManager?.setEnabled(true)
+        }
+
+        guard LLMPromptTemplateStore.customTemplateCount() > 0 else {
+            updateStatus("暂无可导出的自定义模板")
+            return
+        }
+        guard let data = LLMPromptTemplateStore.exportCustomTemplates() else {
+            updateStatus("导出失败：无法生成模板文件")
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "smartvoicein-llm-templates.json"
+        panel.allowedContentTypes = [UTType.json]
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            updateStatus("已取消导出模板")
+            return
+        }
+
+        do {
+            try data.write(to: url)
+            updateStatus("模板导出成功: \(url.lastPathComponent)")
+        } catch {
+            updateStatus("模板导出失败: \(error.localizedDescription)")
+        }
+    }
+
+    @objc private func importPromptTemplates() {
+        hotKeyManager?.setEnabled(false)
+        defer {
+            hotKeyManager?.setEnabled(true)
+        }
+
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType.json]
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            updateStatus("已取消导入模板")
+            return
+        }
+
+        do {
+            let data = try Data(contentsOf: url)
+            let importedCount = LLMPromptTemplateStore.importCustomTemplates(from: data)
+            reloadPromptTemplateMenu()
+            refreshPromptTemplateMenuState()
+            if importedCount > 0 {
+                updateStatus("模板导入成功: 新增 \(importedCount) 个")
+            } else {
+                updateStatus("模板导入完成：没有新增内容")
+            }
+        } catch {
+            updateStatus("模板导入失败: \(error.localizedDescription)")
+        }
+    }
+
+    private func promptTemplateDisplayTitle(_ template: LLMPromptTemplate) -> String {
+        return template.isBuiltIn ? "\(template.title)（内置）" : template.title
     }
 
     @objc private func openTencentCredentialConfiguration() {
@@ -428,8 +806,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ])
 
         alert.accessoryView = accessory
+        let tencentWindow = alert.window
+        tencentWindow.initialFirstResponder = secretIdField
+        tencentWindow.makeFirstResponder(secretIdField)
+        NSApp.activate(ignoringOtherApps: true)
 
-        guard alert.runModal() == .alertFirstButtonReturn else {
+        guard runModalAlertWithEditingShortcuts(alert, preferredFirstResponder: secretIdField) == .alertFirstButtonReturn else {
             updateStatus("已取消腾讯云密钥更新")
             return
         }
@@ -441,8 +823,136 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        refreshTencentCredentialStatusUI()
+        refreshTextOptimizeCredentialStatusUI()
         updateStatus("腾讯云密钥已保存并应用")
+    }
+
+    @objc private func openMiniMaxCredentialConfiguration() {
+        guard voiceInputManager != nil else {
+            updateStatus("配置未就绪，请稍后重试")
+            return
+        }
+        hotKeyManager?.setEnabled(false)
+        defer {
+            hotKeyManager?.setEnabled(true)
+        }
+
+        let existingAPIKey = voiceInputManager.currentMiniMaxAPIKeyValue() ?? ""
+
+        let alert = NSAlert()
+        alert.messageText = "MiniMax API Key 设置"
+        alert.informativeText = "输入 API Key，保存后将持久化到本地并立即应用。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "保存并应用")
+        alert.addButton(withTitle: "取消")
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 72))
+        accessory.translatesAutoresizingMaskIntoConstraints = false
+
+        let apiKeyLabel = NSTextField(labelWithString: "API Key")
+        apiKeyLabel.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(apiKeyLabel)
+
+        let apiKeyField = NSSecureTextField(string: existingAPIKey)
+        apiKeyField.placeholderString = "输入 MiniMax API Key"
+        apiKeyField.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(apiKeyField)
+
+        NSLayoutConstraint.activate([
+            apiKeyLabel.topAnchor.constraint(equalTo: accessory.topAnchor),
+            apiKeyLabel.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
+            apiKeyLabel.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+
+            apiKeyField.topAnchor.constraint(equalTo: apiKeyLabel.bottomAnchor, constant: 6),
+            apiKeyField.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
+            apiKeyField.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+            apiKeyField.bottomAnchor.constraint(equalTo: accessory.bottomAnchor)
+        ])
+
+        alert.accessoryView = accessory
+        let miniMaxWindow = alert.window
+        miniMaxWindow.initialFirstResponder = apiKeyField
+        miniMaxWindow.makeFirstResponder(apiKeyField)
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard runModalAlertWithEditingShortcuts(alert, preferredFirstResponder: apiKeyField) == .alertFirstButtonReturn else {
+            updateStatus("已取消 MiniMax API Key 更新")
+            return
+        }
+
+        let apiKey = apiKeyField.stringValue
+        guard voiceInputManager.updateMiniMaxAPIKey(apiKey: apiKey) else {
+            updateStatus("保存失败：MiniMax API Key 不能为空")
+            return
+        }
+
+        refreshTextOptimizeCredentialStatusUI()
+        updateStatus("MiniMax API Key 已保存并应用")
+    }
+
+    @objc private func openLocalLLMModelConfiguration() {
+        guard voiceInputManager != nil else {
+            updateStatus("配置未就绪，请稍后重试")
+            return
+        }
+        hotKeyManager?.setEnabled(false)
+        defer {
+            hotKeyManager?.setEnabled(true)
+        }
+
+        let existingModelID = voiceInputManager.currentLocalLLMModelIDValue() ?? "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+
+        let alert = NSAlert()
+        alert.messageText = "本地 LLM 模型设置"
+        alert.informativeText = "输入 Hugging Face 模型 ID，保存后将持久化到本地并立即应用。示例：mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "保存并应用")
+        alert.addButton(withTitle: "取消")
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 620, height: 84))
+        accessory.translatesAutoresizingMaskIntoConstraints = false
+
+        let modelIDLabel = NSTextField(labelWithString: "Model ID")
+        modelIDLabel.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(modelIDLabel)
+
+        let modelIDField = NSTextField(string: existingModelID)
+        modelIDField.placeholderString = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+        modelIDField.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(modelIDField)
+
+        NSLayoutConstraint.activate([
+            accessory.widthAnchor.constraint(equalToConstant: 620),
+            modelIDLabel.topAnchor.constraint(equalTo: accessory.topAnchor),
+            modelIDLabel.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
+            modelIDLabel.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+
+            modelIDField.topAnchor.constraint(equalTo: modelIDLabel.bottomAnchor, constant: 6),
+            modelIDField.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
+            modelIDField.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+            modelIDField.widthAnchor.constraint(equalToConstant: 620),
+            modelIDField.bottomAnchor.constraint(equalTo: accessory.bottomAnchor)
+        ])
+
+        alert.accessoryView = accessory
+        let localModelWindow = alert.window
+        localModelWindow.initialFirstResponder = modelIDField
+        localModelWindow.makeFirstResponder(modelIDField)
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard runModalAlertWithEditingShortcuts(alert, preferredFirstResponder: modelIDField) == .alertFirstButtonReturn else {
+            updateStatus("已取消本地模型更新")
+            return
+        }
+
+        let modelID = modelIDField.stringValue
+        guard voiceInputManager.updateLocalLLMModelID(modelID: modelID) else {
+            updateStatus("保存失败：Model ID 不能为空")
+            return
+        }
+
+        refreshTextOptimizeCredentialStatusUI()
+        updateStatus("本地模型已保存并应用: \(modelID.trimmingCharacters(in: .whitespacesAndNewlines))")
     }
 
     private func setupHotKey() {
@@ -594,7 +1104,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         stopHotKeyCaptureMonitor()
         let mask: NSEvent.EventTypeMask = [.flagsChanged, .keyDown, .keyUp]
         hotKeyCaptureMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
-            self?.handleHotKeyCaptureEvent(event)
+            guard let self, self.hotKeyCapturePanel != nil else {
+                return event
+            }
+            self.handleHotKeyCaptureEvent(event)
             return nil
         }
     }
@@ -648,6 +1161,73 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotKeyCaptureStatusLabel?.stringValue = "已捕获: \(HotKeyManager.formatShortcutDisplayName(keyCodes: normalized))"
     }
 
+    private func runModalAlertWithEditingShortcuts(
+        _ alert: NSAlert,
+        preferredFirstResponder: NSView
+    ) -> NSApplication.ModalResponse {
+        let alertWindow = alert.window
+        alertWindow.initialFirstResponder = preferredFirstResponder
+        alertWindow.makeFirstResponder(preferredFirstResponder)
+        DispatchQueue.main.async { [weak alertWindow, weak preferredFirstResponder] in
+            guard let alertWindow, let preferredFirstResponder else { return }
+            alertWindow.makeFirstResponder(preferredFirstResponder)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak alertWindow, weak preferredFirstResponder] in
+            guard let alertWindow, let preferredFirstResponder else { return }
+            alertWindow.makeFirstResponder(preferredFirstResponder)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+
+        var editingShortcutMonitor: Any?
+        editingShortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let unsupportedFlags = flags.subtracting([.command, .shift])
+            guard unsupportedFlags.isEmpty,
+                  flags.contains(.command) else {
+                return event
+            }
+
+            let keyCode = event.keyCode
+            let action: Selector
+            switch keyCode {
+            case 8:
+                action = #selector(NSText.copy(_:))
+            case 9:
+                action = #selector(NSText.paste(_:))
+            case 7:
+                action = #selector(NSText.cut(_:))
+            case 0:
+                action = #selector(NSText.selectAll(_:))
+            case 6:
+                action = flags.contains(.shift) ? #selector(UndoManager.redo) : #selector(UndoManager.undo)
+            default:
+                return event
+            }
+
+            if let responder = alertWindow.firstResponder,
+               responder.tryToPerform(action, with: nil) {
+                return nil
+            }
+
+            _ = alertWindow.makeFirstResponder(preferredFirstResponder)
+            if let responder = alertWindow.firstResponder,
+               responder.tryToPerform(action, with: nil) {
+                return nil
+            }
+
+            _ = NSApp.sendAction(action, to: nil, from: nil)
+            return nil
+        }
+
+        defer {
+            if let editingShortcutMonitor {
+                NSEvent.removeMonitor(editingShortcutMonitor)
+            }
+        }
+
+        return alert.runModal()
+    }
+
     private func requestPermissions() {
         SFSpeechRecognizer.requestAuthorization { status in
             DispatchQueue.main.async {
@@ -699,9 +1279,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let targetApp = resolveInputTargetApplication()
         if let targetApp {
             _ = targetApp.activate(options: [.activateAllWindows])
-            print("[SmartVoiceIn] Activated target app: \(targetApp.localizedName ?? "Unknown")")
+            AppLog.log("[SmartVoiceIn] Activated target app: \(targetApp.localizedName ?? "Unknown")")
         } else {
-            print("[SmartVoiceIn] No target app captured, pasting to current front app")
+            AppLog.log("[SmartVoiceIn] No target app captured, pasting to current front app")
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
@@ -726,7 +1306,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         lastInputTargetApplication = frontmost
-        print("[SmartVoiceIn] Captured input target app: \(frontmost.localizedName ?? "Unknown")")
+        AppLog.log("[SmartVoiceIn] Captured input target app: \(frontmost.localizedName ?? "Unknown")")
     }
 
     private func resolveInputTargetApplication() -> NSRunningApplication? {

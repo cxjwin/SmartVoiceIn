@@ -10,8 +10,10 @@ class VoiceInputManager: NSObject {
     }
 
     private static let asrProviderOverrideKey = "voiceinput.asr.provider.override"
+    private static let localLLMModelOverrideKey = "voiceinput.local_llm.model.override"
     private static let tencentSecretIdOverrideKey = "voiceinput.tencent.secret_id.override"
     private static let tencentSecretKeyOverrideKey = "voiceinput.tencent.secret_key.override"
+    private static let minimaxAPIKeyOverrideKey = "voiceinput.minimax.api_key.override"
 
     static let supportedASRProviderRawValues = [
         ASRProviderType.qwen3Local.rawValue,
@@ -54,8 +56,10 @@ class VoiceInputManager: NSObject {
     private var asrProviderType: ASRProviderType = .qwen3Local
     private var asrProvider: ASRProvider?
     private var llmTextOptimizer: LLMTextOptimizer?
+    private var localLLMModelID: String?
     private var tencentSecretId: String?
     private var tencentSecretKey: String?
+    private var minimaxAPIKey: String?
     private let targetSampleRate: Double = 16000
     private let targetChannels: AVAudioChannelCount = 1
     private let targetBitsPerSample = 16
@@ -68,13 +72,25 @@ class VoiceInputManager: NSObject {
         self.onStatusUpdate = onStatusUpdate
 
         let env = ProcessInfo.processInfo.environment
+        if let persistedLocalLLMModelID = Self.loadPersistedLocalLLMModelID() {
+            self.localLLMModelID = persistedLocalLLMModelID
+            AppLog.log("[SmartVoiceIn] Loaded persisted local LLM model ID from local storage")
+        } else {
+            self.localLLMModelID = env["VOICEINPUT_LOCAL_LLM_MODEL"]
+        }
         if let persisted = Self.loadPersistedTencentCredentials() {
             self.tencentSecretId = persisted.secretId
             self.tencentSecretKey = persisted.secretKey
-            print("[SmartVoiceIn] Loaded persisted Tencent credentials from local storage")
+            AppLog.log("[SmartVoiceIn] Loaded persisted Tencent credentials from local storage")
         } else {
             self.tencentSecretId = env["VOICEINPUT_TENCENT_SECRET_ID"]
             self.tencentSecretKey = env["VOICEINPUT_TENCENT_SECRET_KEY"]
+        }
+        if let persistedMiniMaxAPIKey = Self.loadPersistedMiniMaxAPIKey() {
+            self.minimaxAPIKey = persistedMiniMaxAPIKey
+            AppLog.log("[SmartVoiceIn] Loaded persisted MiniMax API key from local storage")
+        } else {
+            self.minimaxAPIKey = env["VOICEINPUT_MINIMAX_API_KEY"] ?? env["MINIMAX_API_KEY"]
         }
         self.asrProviderType = ASRProviderType(rawValue: Self.currentASRProviderRawValue()) ?? .qwen3Local
         let hasTencentCredentialsAtStartup =
@@ -82,18 +98,20 @@ class VoiceInputManager: NSObject {
         if self.asrProviderType == .tencentCloud && !hasTencentCredentialsAtStartup {
             self.asrProviderType = .qwen3Local
             Self.setASRProviderOverride(rawValue: ASRProviderType.qwen3Local.rawValue)
-            print("[SmartVoiceIn] Requested ASR provider is unavailable at startup, fallback to Qwen3 local model")
+            AppLog.log("[SmartVoiceIn] Requested ASR provider is unavailable at startup, fallback to Qwen3 local model")
         }
 
         self.llmTextOptimizer = LLMTextOptimizer(
+            fallbackLocalLLMModelID: localLLMModelID,
             fallbackTencentSecretId: tencentSecretId,
-            fallbackTencentSecretKey: tencentSecretKey
+            fallbackTencentSecretKey: tencentSecretKey,
+            fallbackMiniMaxAPIKey: minimaxAPIKey
         )
         let shouldPrewarmLLMAtStartup = (self.llmTextOptimizer != nil)
         if self.llmTextOptimizer == nil {
-            print("[SmartVoiceIn] LLM optimizer disabled (startup, missing/invalid provider config), using local clean only")
+            AppLog.log("[SmartVoiceIn] LLM optimizer disabled (startup, missing/invalid provider config), using local clean only")
         } else {
-            print("[SmartVoiceIn] LLM optimizer enabled (startup)")
+            AppLog.log("[SmartVoiceIn] LLM optimizer enabled (startup)")
         }
 
         // 初始化苹果语音识别器（备用）
@@ -141,9 +159,17 @@ class VoiceInputManager: NSObject {
         guard LLMTextOptimizer.supportedProviderRawValues.contains(rawValue) else {
             return false
         }
+
+        let previousRawValue = LLMTextOptimizer.currentProviderRawValue()
         LLMTextOptimizer.setProviderOverride(rawValue: rawValue)
         rebuildLLMTextOptimizer(logPrefix: "provider switch to \(rawValue)")
-        return true
+        if llmTextOptimizer != nil {
+            return true
+        }
+
+        LLMTextOptimizer.setProviderOverride(rawValue: previousRawValue)
+        rebuildLLMTextOptimizer(logPrefix: "provider rollback to \(previousRawValue)")
+        return false
     }
 
     func currentTencentCredentialValues() -> (secretId: String, secretKey: String)? {
@@ -156,6 +182,25 @@ class VoiceInputManager: NSObject {
 
     func hasTencentCredentialsConfigured() -> Bool {
         return currentTencentCredentialValues() != nil
+    }
+
+    func currentMiniMaxAPIKeyValue() -> String? {
+        guard let minimaxAPIKey, !minimaxAPIKey.isEmpty else {
+            return nil
+        }
+        return minimaxAPIKey
+    }
+
+    func hasMiniMaxAPIKeyConfigured() -> Bool {
+        return currentMiniMaxAPIKeyValue() != nil
+    }
+
+    func currentLocalLLMModelIDValue() -> String? {
+        guard let localLLMModelID else {
+            return nil
+        }
+        let normalized = localLLMModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
     }
 
     @discardableResult
@@ -176,6 +221,32 @@ class VoiceInputManager: NSObject {
         return true
     }
 
+    @discardableResult
+    func updateMiniMaxAPIKey(apiKey: String) -> Bool {
+        let normalizedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedAPIKey.isEmpty else {
+            return false
+        }
+
+        minimaxAPIKey = normalizedAPIKey
+        Self.persistMiniMaxAPIKey(apiKey: normalizedAPIKey)
+        rebuildLLMTextOptimizer(logPrefix: "MiniMax API key updated")
+        return true
+    }
+
+    @discardableResult
+    func updateLocalLLMModelID(modelID: String) -> Bool {
+        let normalizedModelID = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedModelID.isEmpty else {
+            return false
+        }
+
+        localLLMModelID = normalizedModelID
+        Self.persistLocalLLMModelID(modelID: normalizedModelID)
+        rebuildLLMTextOptimizer(logPrefix: "local LLM model updated")
+        return true
+    }
+
     private func isASRProviderAvailable(_ providerType: ASRProviderType) -> Bool {
         switch providerType {
         case .tencentCloud:
@@ -187,13 +258,15 @@ class VoiceInputManager: NSObject {
 
     private func rebuildLLMTextOptimizer(logPrefix: String) {
         llmTextOptimizer = LLMTextOptimizer(
+            fallbackLocalLLMModelID: localLLMModelID,
             fallbackTencentSecretId: tencentSecretId,
-            fallbackTencentSecretKey: tencentSecretKey
+            fallbackTencentSecretKey: tencentSecretKey,
+            fallbackMiniMaxAPIKey: minimaxAPIKey
         )
         if llmTextOptimizer == nil {
-            print("[SmartVoiceIn] LLM optimizer disabled (\(logPrefix), missing/invalid provider config), using local clean only")
+            AppLog.log("[SmartVoiceIn] LLM optimizer disabled (\(logPrefix), missing/invalid provider config), using local clean only")
         } else {
-            print("[SmartVoiceIn] LLM optimizer enabled (\(logPrefix))")
+            AppLog.log("[SmartVoiceIn] LLM optimizer enabled (\(logPrefix))")
             prewarmLocalLLMIfNeeded(reason: logPrefix)
         }
     }
@@ -205,9 +278,9 @@ class VoiceInputManager: NSObject {
         llmTextOptimizer.prewarmIfNeeded { result in
             switch result {
             case .success:
-                print("[SmartVoiceIn] Local LLM prewarm completed (\(reason))")
+                AppLog.log("[SmartVoiceIn] Local LLM prewarm completed (\(reason))")
             case .failure(let error):
-                print("[SmartVoiceIn] Local LLM prewarm failed (\(reason)): \(error)")
+                AppLog.log("[SmartVoiceIn] Local LLM prewarm failed (\(reason)): \(error)")
             }
         }
     }
@@ -239,7 +312,7 @@ class VoiceInputManager: NSObject {
         }
         llmTextOptimizer.keepAliveIfNeeded(minIdleSeconds: llmKeepAliveMinIdleSeconds) { keptAlive in
             if keptAlive {
-                print("[SmartVoiceIn] Local LLM keep-alive tick completed")
+                AppLog.log("[SmartVoiceIn] Local LLM keep-alive tick completed")
             }
         }
     }
@@ -262,18 +335,18 @@ class VoiceInputManager: NSObject {
     private func handleLLMMemoryPressureEvent() {
         let event = llmMemoryPressureSource?.data ?? []
         let level = event.contains(.critical) ? "critical" : "warning"
-        print("[SmartVoiceIn] Memory pressure detected (\(level)), releasing local LLM resources")
+        AppLog.log("[SmartVoiceIn] Memory pressure detected (\(level)), releasing local LLM resources")
 
         llmTextOptimizer?.releaseLocalResources { result in
             switch result {
             case .success(let released):
                 if released {
-                    print("[SmartVoiceIn] Local LLM resources released due to memory pressure")
+                    AppLog.log("[SmartVoiceIn] Local LLM resources released due to memory pressure")
                 } else {
-                    print("[SmartVoiceIn] Local LLM release skipped (not loaded or non-local provider)")
+                    AppLog.log("[SmartVoiceIn] Local LLM release skipped (not loaded or non-local provider)")
                 }
             case .failure(let error):
-                print("[SmartVoiceIn] Local LLM release failed under memory pressure: \(error)")
+                AppLog.log("[SmartVoiceIn] Local LLM release failed under memory pressure: \(error)")
             }
         }
     }
@@ -295,27 +368,55 @@ class VoiceInputManager: NSObject {
         defaults.set(secretKey, forKey: tencentSecretKeyOverrideKey)
     }
 
+    private static func loadPersistedMiniMaxAPIKey() -> String? {
+        let defaults = UserDefaults.standard
+        guard let apiKey = defaults.string(forKey: minimaxAPIKeyOverrideKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !apiKey.isEmpty else {
+            return nil
+        }
+        return apiKey
+    }
+
+    private static func persistMiniMaxAPIKey(apiKey: String) {
+        UserDefaults.standard.set(apiKey, forKey: minimaxAPIKeyOverrideKey)
+    }
+
+    private static func loadPersistedLocalLLMModelID() -> String? {
+        let defaults = UserDefaults.standard
+        guard let modelID = defaults.string(forKey: localLLMModelOverrideKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !modelID.isEmpty else {
+            return nil
+        }
+        return modelID
+    }
+
+    private static func persistLocalLLMModelID(modelID: String) {
+        UserDefaults.standard.set(modelID, forKey: localLLMModelOverrideKey)
+    }
+
     private func configureASRProvider() {
         switch asrProviderType {
         case .qwen3Local:
             asrProvider = Qwen3ASRProvider()
-            print("[SmartVoiceIn] ASR provider switched to Qwen3 local model")
+            AppLog.log("[SmartVoiceIn] ASR provider switched to Qwen3 local model")
         case .appleSpeech:
             asrProvider = nil
-            print("[SmartVoiceIn] ASR provider switched to Apple Speech")
+            AppLog.log("[SmartVoiceIn] ASR provider switched to Apple Speech")
         case .tencentCloud:
             guard let credentials = currentTencentCredentialValues() else {
                 asrProvider = nil
-                print("[SmartVoiceIn] ASR provider switch failed: Tencent credentials missing")
+                AppLog.log("[SmartVoiceIn] ASR provider switch failed: Tencent credentials missing")
                 return
             }
             asrProvider = TencentASRProvider(secretId: credentials.secretId, secretKey: credentials.secretKey)
-            print("[SmartVoiceIn] ASR provider switched to Tencent Cloud")
+            AppLog.log("[SmartVoiceIn] ASR provider switched to Tencent Cloud")
         }
     }
 
     func startRecording() {
-        print("[SmartVoiceIn] Starting recording...")
+        AppLog.log("[SmartVoiceIn] Starting recording...")
         recognizedText = ""
         hasReturnedResult = false
         audioData = Data()
@@ -327,7 +428,7 @@ class VoiceInputManager: NSObject {
 
         let inputNode = audioEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
-        print("[SmartVoiceIn] Input format: \(inputFormat.sampleRate)Hz, \(inputFormat.channelCount)ch")
+        AppLog.log("[SmartVoiceIn] Input format: \(inputFormat.sampleRate)Hz, \(inputFormat.channelCount)ch")
 
         // 使用 16kHz 采样率
         guard let recordingFormat = AVAudioFormat(
@@ -336,16 +437,16 @@ class VoiceInputManager: NSObject {
             channels: targetChannels,
             interleaved: true
         ) else {
-            print("[SmartVoiceIn] Cannot create 16kHz format")
+            AppLog.log("[SmartVoiceIn] Cannot create 16kHz format")
             onResult(.failure(NSError(domain: "SmartVoiceIn", code: 4, userInfo: [NSLocalizedDescriptionKey: "无法创建音频格式"])))
             return
         }
 
-        print("[SmartVoiceIn] Target format: \(recordingFormat.sampleRate)Hz, \(recordingFormat.channelCount)ch")
+        AppLog.log("[SmartVoiceIn] Target format: \(recordingFormat.sampleRate)Hz, \(recordingFormat.channelCount)ch")
 
         // 安装重采样器
         guard let converter = AVAudioConverter(from: inputFormat, to: recordingFormat) else {
-            print("[SmartVoiceIn] Cannot create converter from \(inputFormat) to \(recordingFormat)")
+            AppLog.log("[SmartVoiceIn] Cannot create converter from \(inputFormat) to \(recordingFormat)")
             onResult(.failure(NSError(domain: "SmartVoiceIn", code: 5, userInfo: [NSLocalizedDescriptionKey: "无法创建转换器"])))
             return
         }
@@ -360,9 +461,9 @@ class VoiceInputManager: NSObject {
         do {
             try audioEngine.start()
             isRecording = true
-            print("[SmartVoiceIn] Audio engine started")
+            AppLog.log("[SmartVoiceIn] Audio engine started")
         } catch {
-            print("[SmartVoiceIn] Failed to start audio engine: \(error)")
+            AppLog.log("[SmartVoiceIn] Failed to start audio engine: \(error)")
             onResult(.failure(error))
         }
     }
@@ -373,7 +474,7 @@ class VoiceInputManager: NSObject {
         let frameCapacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
 
         guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCapacity) else {
-            print("[SmartVoiceIn] Cannot create converted buffer")
+            AppLog.log("[SmartVoiceIn] Cannot create converted buffer")
             return
         }
 
@@ -386,7 +487,7 @@ class VoiceInputManager: NSObject {
         converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
 
         if let error = error {
-            print("[SmartVoiceIn] Convert error: \(error)")
+            AppLog.log("[SmartVoiceIn] Convert error: \(error)")
             return
         }
 
@@ -394,41 +495,40 @@ class VoiceInputManager: NSObject {
             let frameLength = Int(convertedBuffer.frameLength)
             let data = Data(bytes: channelData[0], count: frameLength * 2)
             audioData.append(data)
-            print("[SmartVoiceIn] Appended \(data.count) bytes (frames: \(frameLength)), total: \(audioData.count)")
         } else {
-            print("[SmartVoiceIn] No int16 channel data")
+            AppLog.log("[SmartVoiceIn] No int16 channel data")
         }
     }
 
     func stopRecording() {
-        print("[SmartVoiceIn] Stopping recording...")
+        AppLog.log("[SmartVoiceIn] Stopping recording...")
         isRecording = false
 
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
 
         let dataSize = audioData.count
-        print("[SmartVoiceIn] Collected audio data: \(dataSize) bytes")
+        AppLog.log("[SmartVoiceIn] Collected audio data: \(dataSize) bytes")
 
         guard dataSize > 0 else {
-            print("[SmartVoiceIn] No audio data collected")
+            AppLog.log("[SmartVoiceIn] No audio data collected")
             recognizeWithLocalFallback()
             return
         }
 
         if asrProviderType == .appleSpeech {
-            print("[SmartVoiceIn] Using Apple Speech ASR...")
+            AppLog.log("[SmartVoiceIn] Using Apple Speech ASR...")
             recognizeWithLocalFallback()
             return
         }
 
         guard let asrProvider else {
-            print("[SmartVoiceIn] No ASR provider, using local fallback")
+            AppLog.log("[SmartVoiceIn] No ASR provider, using local fallback")
             recognizeWithLocalFallback()
             return
         }
 
-        print("[SmartVoiceIn] Using \(asrProvider.name) ASR...")
+        AppLog.log("[SmartVoiceIn] Using \(asrProvider.name) ASR...")
         asrProvider.recognize(
             audioPCMData: audioData,
             sampleRate: Int(targetSampleRate),
@@ -437,10 +537,10 @@ class VoiceInputManager: NSObject {
         ) { [weak self] result in
             switch result {
             case .success(let text):
-                print("[SmartVoiceIn] \(asrProvider.name) ASR success: \(text)")
+                AppLog.log("[SmartVoiceIn] \(asrProvider.name) ASR success: \(text)")
                 self?.postProcessRecognizedText(text)
             case .failure(let error):
-                print("[SmartVoiceIn] \(asrProvider.name) ASR failed: \(error), falling back to local")
+                AppLog.log("[SmartVoiceIn] \(asrProvider.name) ASR failed: \(error), falling back to local")
                 self?.recognizeWithLocalFallback()
             }
         }
@@ -470,16 +570,16 @@ class VoiceInputManager: NSObject {
             recognizer.recognitionTask(with: request) { [weak self] result, error in
                 if let result = result, result.isFinal {
                     let text = result.bestTranscription.formattedString
-                    print("[SmartVoiceIn] Local ASR success: \(text)")
+                    AppLog.log("[SmartVoiceIn] Local ASR success: \(text)")
                     self?.postProcessRecognizedText(text)
                 }
                 if let error = error {
-                    print("[SmartVoiceIn] Local ASR error: \(error)")
+                    AppLog.log("[SmartVoiceIn] Local ASR error: \(error)")
                     self?.onResult(.failure(error))
                 }
             }
         } catch {
-            print("[SmartVoiceIn] Failed to save audio file: \(error)")
+            AppLog.log("[SmartVoiceIn] Failed to save audio file: \(error)")
             onResult(.failure(error))
         }
     }
@@ -516,150 +616,27 @@ class VoiceInputManager: NSObject {
         return wavData
     }
 
-    /// 清理文本，去除语气词和明显重复。
-    /// - parameter aggressive: `true` 时也会清理“然后/就是/这个”等口头禅；`false` 仅清理高置信语气词（如“呃/嗯/uh”）
-    private static func cleanText(_ text: String, aggressive: Bool = true) -> String {
-        var result = text
-
-        let lightFillers = [
-            "嗯嗯", "嗯啊", "啊嗯", "啊啊", "嗯呢",
-            "嗯", "啊", "呀", "哦", "额", "呃", "唔",
-            "uh", "um", "ah"
-        ]
-        let aggressiveOnlyFillers = ["那个", "然后", "就是", "其实", "这个"]
-        let fillers = aggressive ? (lightFillers + aggressiveOnlyFillers) : lightFillers
-
-        result = removeStandaloneFillers(result, fillers: fillers)
-
-        if let regex = try? NSRegularExpression(pattern: "(.)\\1{2,}", options: []) {
-            result = regex.stringByReplacingMatches(
-                in: result,
-                options: [],
-                range: NSRange(result.startIndex..., in: result),
-                withTemplate: "$1"
-            )
-        }
-
-        result = normalizePunctuationAndWhitespace(result)
-
-        result = result.trimmingCharacters(in: .whitespacesAndNewlines)
-        let punctuationToRemove = ["...", "。", "，", "、", "；", "：", "？", "！"]
-        for p in punctuationToRemove {
-            if result.hasSuffix(p) {
-                result = String(result.dropLast())
-            }
-            if result.hasPrefix(p) {
-                result = String(result.dropFirst())
-            }
-        }
-
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func removeStandaloneFillers(_ text: String, fillers: [String]) -> String {
-        guard !fillers.isEmpty else {
-            return text
-        }
-
-        let escaped = fillers.map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|")
-        let separators = "\\s,，。！？!?：:；;、()（）\\[\\]【】\"“”'‘’"
-        let pattern = "(^|[\(separators)])(\(escaped))(?=($|[\(separators)]))"
-
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return text
-        }
-
-        var result = regex.stringByReplacingMatches(
-            in: text,
-            options: [],
-            range: NSRange(text.startIndex..., in: text),
-            withTemplate: "$1"
-        )
-
-        // 处理紧连的重复语气词，例如“呃呃”、“嗯嗯嗯”
-        let repeatedLightFillerPattern = "(?:呃|额|嗯|啊|哦|唔){2,}"
-        if let repeatedRegex = try? NSRegularExpression(pattern: repeatedLightFillerPattern, options: []) {
-            result = repeatedRegex.stringByReplacingMatches(
-                in: result,
-                options: [],
-                range: NSRange(result.startIndex..., in: result),
-                withTemplate: ""
-            )
-        }
-
-        return result
-    }
-
-    private static func normalizePunctuationAndWhitespace(_ text: String) -> String {
-        var result = text
-
-        if let regex = try? NSRegularExpression(pattern: "\\s+", options: []) {
-            result = regex.stringByReplacingMatches(
-                in: result,
-                options: [],
-                range: NSRange(result.startIndex..., in: result),
-                withTemplate: " "
-            )
-        }
-
-        if let regex = try? NSRegularExpression(pattern: "\\s*([，。！？；：、,.!?;:])\\s*", options: []) {
-            result = regex.stringByReplacingMatches(
-                in: result,
-                options: [],
-                range: NSRange(result.startIndex..., in: result),
-                withTemplate: "$1"
-            )
-        }
-
-        if let regex = try? NSRegularExpression(pattern: "([，、,.]){2,}", options: []) {
-            result = regex.stringByReplacingMatches(
-                in: result,
-                options: [],
-                range: NSRange(result.startIndex..., in: result),
-                withTemplate: "$1"
-            )
-        }
-
-        if let regex = try? NSRegularExpression(pattern: "([。！？!?]){2,}", options: []) {
-            result = regex.stringByReplacingMatches(
-                in: result,
-                options: [],
-                range: NSRange(result.startIndex..., in: result),
-                withTemplate: "$1"
-            )
-        }
-
-        return result
-    }
-
-    /// 统一后处理：优先大模型，失败时回退本地清洗
+    /// 统一后处理：全部交由 LLM；失败时回退原文。
     private func postProcessRecognizedText(_ text: String) {
-        print("[SmartVoiceIn] Post-processing text started")
+        AppLog.log("[SmartVoiceIn] Post-processing text started")
         let callback = onResult
         if let llmTextOptimizer {
-            print("[SmartVoiceIn] Running LLM text optimization...")
+            AppLog.log("[SmartVoiceIn] Running LLM text optimization...")
             onStatusUpdate?("正在转换中（LLM 文本优化）...")
             llmTextOptimizer.optimize(text: text) { result in
                 switch result {
                 case .success(let optimized):
-                    let finalized = Self.cleanText(optimized, aggressive: false)
-                    print("[SmartVoiceIn] LLM optimized text: \(optimized)")
-                    if finalized != optimized {
-                        print("[SmartVoiceIn] LLM post-cleaned text: \(finalized)")
-                    }
-                    callback(.success(finalized))
+                    AppLog.log("[SmartVoiceIn] LLM optimized text: \(optimized)")
+                    callback(.success(optimized))
                 case .failure(let error):
-                    print("[SmartVoiceIn] LLM optimization failed: \(error), fallback to local clean")
-                    self.onStatusUpdate?("转换失败，正在回退本地清洗...")
-                    let cleanedText = Self.cleanText(text)
-                    callback(.success(cleanedText))
+                    AppLog.log("[SmartVoiceIn] LLM optimization failed: \(error), fallback to original text")
+                    self.onStatusUpdate?("转换失败，返回原文")
+                    callback(.success(text))
                 }
             }
         } else {
-            print("[SmartVoiceIn] LLM optimizer unavailable, fallback to local clean")
-            let cleanedText = Self.cleanText(text)
-            print("[SmartVoiceIn] Local cleaned text: \(cleanedText)")
-            onResult(.success(cleanedText))
+            AppLog.log("[SmartVoiceIn] LLM optimizer unavailable, passthrough original text")
+            onResult(.success(text))
         }
     }
 
@@ -673,6 +650,6 @@ class VoiceInputManager: NSObject {
 
 extension VoiceInputManager: SFSpeechRecognizerDelegate {
     func speechRecognizer(_ speechRecognizer: SFSpeechRecognizer, availabilityDidChange available: Bool) {
-        print("[SmartVoiceIn] Availability changed: \(available)")
+        AppLog.log("[SmartVoiceIn] Availability changed: \(available)")
     }
 }

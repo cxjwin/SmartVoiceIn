@@ -31,7 +31,7 @@ private actor LocalMLXModelStore {
             progressHandler: { progress in
                 let value = progress.fractionCompleted
                 if value >= 0 {
-                    print("[LocalLLM] \(self.modelId) loading \(Int(value * 100))%")
+                    AppLog.log("[LocalLLM] \(self.modelId) loading \(Int(value * 100))%")
                 }
             }
         )
@@ -54,22 +54,32 @@ private actor LocalMLXModelStore {
 
 final class LocalMLXLLMProvider: LLMTextOptimizeProvider, @unchecked Sendable {
     static let rawValue = "local_mlx"
-    static let displayName = "本地 MLX (Qwen2.5-0.5B)"
+    static let displayName = "本地 MLX (可配置)"
 
     private let modelStore: LocalMLXModelStore
     private let generateParameters: GenerateParameters
 
     required init?(configuration: LLMTextOptimizeConfiguration) {
         let env = configuration.environment
-        let modelId = env["VOICEINPUT_LOCAL_LLM_MODEL"] ?? "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+        let configuredByEnv = env["VOICEINPUT_LOCAL_LLM_MODEL"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let modelId: String
+        if let configuredByEnv, !configuredByEnv.isEmpty {
+            modelId = configuredByEnv
+        } else {
+            modelId = configuration.fallbackLocalLLMModelID ?? "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+        }
         let configuredMaxTokens = Int(env["VOICEINPUT_LOCAL_LLM_MAX_TOKENS"] ?? "") ?? 160
         let maxTokens = max(64, configuredMaxTokens)
+        let configuredTemperature = Double(env["VOICEINPUT_LOCAL_LLM_TEMPERATURE"] ?? "") ?? 0.8
+        let temperature = min(max(configuredTemperature, 0), 2)
+        let configuredTopP = Double(env["VOICEINPUT_LOCAL_LLM_TOP_P"] ?? "") ?? 0.95
+        let topP = min(max(configuredTopP, 0), 1)
 
         self.modelStore = LocalMLXModelStore(modelId: modelId)
         self.generateParameters = GenerateParameters(
             maxTokens: maxTokens,
-            temperature: 0,
-            topP: 1.0
+            temperature: Float(temperature),
+            topP: Float(topP)
         )
     }
 
@@ -101,19 +111,19 @@ final class LocalMLXLLMProvider: LLMTextOptimizeProvider, @unchecked Sendable {
         }
     }
 
-    func optimize(text: String, completion: @escaping (Result<String, Error>) -> Void) {
+    func optimize(text: String, templatePromptOverride: String?, completion: @escaping (Result<String, Error>) -> Void) {
         let relay = LLMCompletionRelay(completion)
-        let userPrompt = buildOptimizationUserPrompt(userText: text)
+        let promptRequest = buildOptimizationPromptRequest(userText: text, templatePromptOverride: templatePromptOverride)
 
         Task {
             do {
                 let container = try await modelStore.container()
                 let session = ChatSession(
                     container,
-                    instructions: optimizationSystemPrompt,
+                    instructions: promptRequest.systemPrompt ?? "",
                     generateParameters: generateParameters
                 )
-                let output = try await session.respond(to: userPrompt)
+                let output = try await session.respond(to: promptRequest.userPrompt)
                 relay.resolve(.success(output))
             } catch {
                 relay.resolve(.failure(error))

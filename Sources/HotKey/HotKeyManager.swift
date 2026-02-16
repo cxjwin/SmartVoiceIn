@@ -22,7 +22,7 @@ final class HotKeyManager {
         }
         checkAccessibility()
         registerHotKey()
-        print("[HotKey] 当前快捷键: \(currentShortcutDisplayName())")
+        AppLog.log("[HotKey] 当前快捷键: \(currentShortcutDisplayName())")
     }
 
     deinit {
@@ -47,7 +47,7 @@ final class HotKeyManager {
         pressedKeyCodes.removeAll()
         isShortcutActive = false
         persistShortcutKeyCodes(normalized)
-        print("[HotKey] 快捷键已更新: \(Self.formatShortcutDisplayName(keyCodes: normalized))")
+        AppLog.log("[HotKey] 快捷键已更新: \(Self.formatShortcutDisplayName(keyCodes: normalized))")
         return true
     }
 
@@ -56,13 +56,23 @@ final class HotKeyManager {
     }
 
     func setEnabled(_ enabled: Bool) {
-        guard isEnabled != enabled else {
+        if isEnabled == enabled {
+            if enabled {
+                registerHotKey()
+            } else {
+                unregisterHotKey()
+            }
             return
         }
         isEnabled = enabled
         pressedKeyCodes.removeAll()
         isShortcutActive = false
-        print("[HotKey] 监听状态: \(enabled ? "开启" : "暂停")")
+        if enabled {
+            registerHotKey()
+        } else {
+            unregisterHotKey()
+        }
+        AppLog.log("[HotKey] 监听状态: \(enabled ? "开启" : "暂停")")
     }
 
     static func isModifierKeyCode(_ keyCode: UInt16) -> Bool {
@@ -153,13 +163,16 @@ final class HotKeyManager {
     private func checkAccessibility() {
         let trusted = AXIsProcessTrusted()
         if !trusted {
-            print("[HotKey] 需要辅助功能权限")
+            AppLog.log("[HotKey] 需要辅助功能权限")
         } else {
-            print("[HotKey] 辅助功能权限已授予")
+            AppLog.log("[HotKey] 辅助功能权限已授予")
         }
     }
 
     private func registerHotKey() {
+        guard globalMonitor == nil, localMonitor == nil else {
+            return
+        }
         let eventMask: NSEvent.EventTypeMask = [.flagsChanged, .keyDown, .keyUp]
 
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: eventMask) { [weak self] event in
@@ -171,7 +184,7 @@ final class HotKeyManager {
             return event
         }
 
-        print("[HotKey] 监听快捷键事件（支持 1~2 键组合）")
+        AppLog.log("[HotKey] 监听快捷键事件（支持 1~2 键组合）")
     }
 
     private func handleEvent(_ event: NSEvent) {
@@ -218,7 +231,7 @@ final class HotKeyManager {
 
         if isMatch && !isShortcutActive {
             isShortcutActive = true
-            print("[HotKey] 快捷键触发: \(currentShortcutDisplayName())")
+            AppLog.log("[HotKey] 快捷键触发: \(currentShortcutDisplayName())")
             callback()
             return
         }
@@ -231,9 +244,11 @@ final class HotKeyManager {
     private func unregisterHotKey() {
         if let globalMonitor {
             NSEvent.removeMonitor(globalMonitor)
+            self.globalMonitor = nil
         }
         if let localMonitor {
             NSEvent.removeMonitor(localMonitor)
+            self.localMonitor = nil
         }
     }
 }

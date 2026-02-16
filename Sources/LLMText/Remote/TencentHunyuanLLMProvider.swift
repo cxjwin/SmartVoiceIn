@@ -11,6 +11,7 @@ final class TencentHunyuanLLMProvider: LLMTextOptimizeProvider, @unchecked Senda
     private let secretId: String
     private let secretKey: String
     private let region: String
+    private let temperature: Double
 
     private let action = "ChatCompletions"
     private let version = "2023-09-01"
@@ -43,15 +44,17 @@ final class TencentHunyuanLLMProvider: LLMTextOptimizeProvider, @unchecked Senda
         self.model = configuredModel.isEmpty ? "hunyuan-lite" : configuredModel
         self.endpoint = endpoint
         self.timeout = configuration.timeout
+        let configuredTemperature = Double(env["VOICEINPUT_LLM_TEMPERATURE"] ?? "") ?? 0.8
+        self.temperature = min(max(configuredTemperature, 0), 2)
     }
 
-    func optimize(text: String, completion: @escaping (Result<String, Error>) -> Void) {
+    func optimize(text: String, templatePromptOverride: String?, completion: @escaping (Result<String, Error>) -> Void) {
         let relay = LLMCompletionRelay(completion)
 
         let bodyObject: [String: Any] = [
             "Model": model,
-            "Messages": buildOptimizationPromptMessages(userText: text).map { ["Role": $0.role, "Content": $0.content] },
-            "Temperature": 0.0,
+            "Messages": buildOptimizationPromptMessages(userText: text, templatePromptOverride: templatePromptOverride).map { ["Role": $0.role, "Content": $0.content] },
+            "Temperature": temperature,
             "Stream": false
         ]
 

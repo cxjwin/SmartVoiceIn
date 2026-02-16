@@ -42,7 +42,7 @@ private actor Qwen3ModelStore {
         let model = try await Qwen3ASRModel.fromPretrained(
             modelId: modelId,
             progressHandler: { progress, stage in
-                print("[Qwen3ASR] \(stage) \(Int(progress * 100))%")
+                AppLog.log("[Qwen3ASR] \(stage) \(Int(progress * 100))%")
             }
         )
         loadedModel = model

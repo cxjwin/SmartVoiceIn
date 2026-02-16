@@ -49,3 +49,24 @@ targets:
         COMBINE_HIDPI_IMAGES: YES
     entitlements:
       path: Resources/VoiceInput.entitlements
+
+  LLMEvalCLI:
+    type: tool
+    platform: macOS
+    sources:
+      - path: SourcesCLI
+      - path: Sources
+        excludes:
+          - App
+          - ASR
+          - HotKey
+          - VoiceInput
+    dependencies:
+      - package: MLXSwiftLM
+        product: MLXLLM
+      - package: MLXSwiftLM
+        product: MLXLMCommon
+    settings:
+      base:
+        PRODUCT_NAME: LLMEvalCLI
+        PRODUCT_BUNDLE_IDENTIFIER: com.voiceinput.llmeval

@@ -9,6 +9,7 @@ final class LLMTextOptimizer: @unchecked Sendable {
     private static let providerOverrideKey = "voiceinput.llm.provider.override"
     nonisolated(unsafe) private static let providerTypes: [LLMTextOptimizeProvider.Type] = [
         LocalMLXLLMProvider.self,
+        MiniMaxLLMProvider.self,
         TencentHunyuanLLMProvider.self
     ]
 
@@ -22,7 +23,12 @@ final class LLMTextOptimizer: @unchecked Sendable {
         return providerTypes.first(where: { $0.rawValue == rawValue })?.displayName
     }
 
-    static func currentProviderRawValue() -> String {
+    static func currentProviderRawValue(providerRawValueOverride: String? = nil) -> String {
+        if let providerRawValueOverride,
+           supportedProviderRawValues.contains(providerRawValueOverride) {
+            return providerRawValueOverride
+        }
+
         let defaults = UserDefaults.standard
         if let override = defaults.string(forKey: providerOverrideKey),
            supportedProviderRawValues.contains(override) {
@@ -51,9 +57,15 @@ final class LLMTextOptimizer: @unchecked Sendable {
     private let activityStateLock = NSLock()
     private var lastActivityAt = Date()
 
-    init?(fallbackTencentSecretId: String? = nil, fallbackTencentSecretKey: String? = nil) {
+    init?(
+        providerRawValueOverride: String? = nil,
+        fallbackLocalLLMModelID: String? = nil,
+        fallbackTencentSecretId: String? = nil,
+        fallbackTencentSecretKey: String? = nil,
+        fallbackMiniMaxAPIKey: String? = nil
+    ) {
         let env = ProcessInfo.processInfo.environment
-        let providerRawValue = Self.currentProviderRawValue()
+        let providerRawValue = Self.currentProviderRawValue(providerRawValueOverride: providerRawValueOverride)
         guard let providerType = Self.providerTypes.first(where: { $0.rawValue == providerRawValue }) else {
             return nil
         }
@@ -68,8 +80,10 @@ final class LLMTextOptimizer: @unchecked Sendable {
         let configuration = LLMTextOptimizeConfiguration(
             environment: env,
             timeout: timeout,
+            fallbackLocalLLMModelID: fallbackLocalLLMModelID,
             fallbackTencentSecretId: fallbackTencentSecretId,
-            fallbackTencentSecretKey: fallbackTencentSecretKey
+            fallbackTencentSecretKey: fallbackTencentSecretKey,
+            fallbackMiniMaxAPIKey: fallbackMiniMaxAPIKey
         )
 
         guard let provider = providerType.init(configuration: configuration) else {
@@ -152,16 +166,11 @@ final class LLMTextOptimizer: @unchecked Sendable {
         }
         markActivityNow()
 
-        provider.optimize(text: cleanedInput) { result in
+        provider.optimize(text: cleanedInput, templatePromptOverride: nil) { result in
             switch result {
             case .success(let outputText):
                 self.markActivityNow()
                 let normalized = self.normalizeOutput(outputText)
-                if self.isLikelyMeaningShift(original: cleanedInput, optimized: normalized) ||
-                    self.isOverEdited(original: cleanedInput, optimized: normalized) {
-                    completion(.failure(NSError(domain: "LLMTextOptimizer", code: -16, userInfo: [NSLocalizedDescriptionKey: "LLM 改写幅度过大，已回退"])))
-                    return
-                }
                 completion(.success(normalized))
             case .failure(let error):
                 completion(.failure(error))
@@ -187,58 +196,19 @@ final class LLMTextOptimizer: @unchecked Sendable {
     }
 
     private func normalizeOutput(_ content: String) -> String {
-        return content
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "\"", with: "")
-            .replacingOccurrences(of: "“", with: "")
-            .replacingOccurrences(of: "”", with: "")
-    }
-
-    private func isLikelyMeaningShift(original: String, optimized: String) -> Bool {
-        let source = normalizeForCompare(original)
-        let target = normalizeForCompare(optimized)
-        guard !source.isEmpty, !target.isEmpty else { return true }
-
-        let sourceSet = Set(source.map { String($0) })
-        let targetSet = Set(target.map { String($0) })
-        let overlap = sourceSet.intersection(targetSet).count
-        let ratio = Double(overlap) / Double(max(sourceSet.count, 1))
-
-        return ratio < 0.4
-    }
-
-    private func normalizeForCompare(_ text: String) -> String {
-        let filtered = text.unicodeScalars.filter { scalar in
-            CharacterSet.alphanumerics.contains(scalar) || scalar.properties.isAlphabetic
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return ""
         }
-        return String(String.UnicodeScalarView(filtered)).lowercased()
-    }
 
-    private func isOverEdited(original: String, optimized: String) -> Bool {
-        let source = normalizeForCompare(original)
-        let target = normalizeForCompare(optimized)
-        guard !source.isEmpty, !target.isEmpty else { return true }
+        // Remove common wrapper prefixes some models add instead of returning pure cleaned text.
+        let wrapperPattern = #"^\s*(清洗后|优化后|输出|结果|改写后)\s*[:：]\s*"#
+        let unwrapped = trimmed.replacingOccurrences(
+            of: wrapperPattern,
+            with: "",
+            options: .regularExpression
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let distance = levenshteinDistance(Array(source), Array(target))
-        let ratio = Double(distance) / Double(max(source.count, 1))
-        return ratio > 0.25
-    }
-
-    private func levenshteinDistance(_ a: [Character], _ b: [Character]) -> Int {
-        if a.isEmpty { return b.count }
-        if b.isEmpty { return a.count }
-
-        var prev = Array(0...b.count)
-        var curr = Array(repeating: 0, count: b.count + 1)
-
-        for i in 1...a.count {
-            curr[0] = i
-            for j in 1...b.count {
-                let cost = (a[i - 1] == b[j - 1]) ? 0 : 1
-                curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
-            }
-            prev = curr
-        }
-        return prev[b.count]
+        return unwrapped
     }
 }
