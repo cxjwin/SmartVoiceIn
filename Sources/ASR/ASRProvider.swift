@@ -10,6 +10,14 @@ protocol ASRProvider {
         bitsPerSample: Int,
         completion: @escaping (Result<String, Error>) -> Void
     )
+
+    func prewarm(completion: @escaping (Result<Void, Error>) -> Void)
+}
+
+extension ASRProvider {
+    func prewarm(completion: @escaping (Result<Void, Error>) -> Void) {
+        completion(.success(()))
+    }
 }
 
 enum AudioFileBuilder {

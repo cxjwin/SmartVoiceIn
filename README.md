@@ -13,6 +13,12 @@
   - `Qwen3 本地模型`
   - `Apple Speech`
   - `腾讯云 ASR`
+- Qwen3 ASR 模型可配置：
+  - 支持输入/切换 Hugging Face 模型 ID
+  - 保存后持久化到本地并立即应用
+  - 切换后会异步预加载模型，减少首次识别等待
+  - 预加载进度会显示在状态 panel
+  - 模型加载中触发识别时，会回退到 Apple Speech，避免卡住
 - 默认主链路为本地 Qwen3-ASR（`qwen3-asr-swift`），失败自动回退本地 `Speech`
 - 识别后文本后处理：
   - 优先 LLM 优化（可切换提供方）
@@ -32,6 +38,7 @@
   - 输入框宽度已加宽（适配较长模型 ID / API Key）
   - 支持 `Command + C/V/X/A/Z` 编辑快捷键，不再触发系统提示音
 - 录音日志已精简：默认仅输出关键状态与汇总信息（如最终音频字节数）
+- 状态 panel 位于屏幕底部居中，避免遮挡顶部工具栏
 
 ## 项目结构
 
@@ -56,8 +63,13 @@
 ## 本地 ASR 配置（Qwen3）
 
 - `VOICEINPUT_QWEN3_MODEL=mlx-community/Qwen3-ASR-0.6B-4bit`（可选，默认值）
+- 支持模型：
+  - `mlx-community/Qwen3-ASR-0.6B-4bit`
+  - `mlx-community/Qwen3-ASR-1.7B-8bit`
+  - 说明：不支持 `mlx-community/Qwen3-ASR-1.7B-4bit`，会自动纠正到 `1.7B-8bit`
 
 首次识别时会自动下载模型到 HuggingFace 本地缓存，后续离线可直接使用本地模型。
+也可在菜单栏 `语音识别引擎 -> 设置 Qwen3 模型...` 手动切换模型，保存后会持久化并在下次启动继续生效。
 
 ## ASR 引擎配置（可选）
 
@@ -85,7 +97,7 @@ xcodebuild -project "VoiceInput.xcodeproj" -scheme "VoiceInput" -configuration D
    - 在 Xcode 中运行 `VoiceInput` scheme（`Debug` + `My Mac`，产物为 `SmartVoiceIn.app`）
 2. 确认 UI 初始状态
    - 菜单栏出现麦克风图标
-   - 屏幕顶部出现悬浮状态控件，初始显示 `就绪`
+   - 屏幕底部居中出现悬浮状态控件，初始显示 `就绪`
 3. 首次权限授权
    - 系统设置中为 `SmartVoiceIn` 开启：`麦克风`、`语音识别`、`辅助功能`
 4. 验证基础录音链路

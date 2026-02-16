@@ -10,6 +10,7 @@ class VoiceInputManager: NSObject {
     }
 
     private static let asrProviderOverrideKey = "voiceinput.asr.provider.override"
+    private static let qwen3ASRModelOverrideKey = "voiceinput.qwen3.asr.model.override"
     private static let localLLMModelOverrideKey = "voiceinput.local_llm.model.override"
     private static let tencentSecretIdOverrideKey = "voiceinput.tencent.secret_id.override"
     private static let tencentSecretKeyOverrideKey = "voiceinput.tencent.secret_key.override"
@@ -55,6 +56,7 @@ class VoiceInputManager: NSObject {
     // 主 ASR（本地 Qwen3）
     private var asrProviderType: ASRProviderType = .qwen3Local
     private var asrProvider: ASRProvider?
+    private var qwen3ASRModelID: String?
     private var llmTextOptimizer: LLMTextOptimizer?
     private var localLLMModelID: String?
     private var tencentSecretId: String?
@@ -72,6 +74,25 @@ class VoiceInputManager: NSObject {
         self.onStatusUpdate = onStatusUpdate
 
         let env = ProcessInfo.processInfo.environment
+        if let persistedQwen3ASRModelID = Self.loadPersistedQwen3ASRModelID() {
+            self.qwen3ASRModelID = persistedQwen3ASRModelID
+            AppLog.log("[SmartVoiceIn] Loaded persisted Qwen3 ASR model ID from local storage")
+        } else {
+            self.qwen3ASRModelID = env["VOICEINPUT_QWEN3_MODEL"]
+        }
+        if let currentQwen3ModelID = qwen3ASRModelID {
+            if let normalizedQwen3ModelID = Qwen3ASRProvider.normalizedSupportedModelID(from: currentQwen3ModelID) {
+                if normalizedQwen3ModelID != currentQwen3ModelID {
+                    qwen3ASRModelID = normalizedQwen3ModelID
+                    Self.persistQwen3ASRModelID(modelID: normalizedQwen3ModelID)
+                    AppLog.log("[SmartVoiceIn] Normalized Qwen3 ASR model ID to supported value: \(normalizedQwen3ModelID)")
+                }
+            } else {
+                qwen3ASRModelID = Qwen3ASRProvider.defaultModelID
+                Self.persistQwen3ASRModelID(modelID: Qwen3ASRProvider.defaultModelID)
+                AppLog.log("[SmartVoiceIn] Unsupported Qwen3 ASR model ID detected, fallback to default: \(Qwen3ASRProvider.defaultModelID)")
+            }
+        }
         if let persistedLocalLLMModelID = Self.loadPersistedLocalLLMModelID() {
             self.localLLMModelID = persistedLocalLLMModelID
             AppLog.log("[SmartVoiceIn] Loaded persisted local LLM model ID from local storage")
@@ -117,7 +138,7 @@ class VoiceInputManager: NSObject {
         // 初始化苹果语音识别器（备用）
         self.speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
         super.init()
-        configureASRProvider()
+        configureASRProvider(reason: "startup")
         self.speechRecognizer?.delegate = self
         startLLMRuntimeGuards()
         if shouldPrewarmLLMAtStartup {
@@ -150,7 +171,7 @@ class VoiceInputManager: NSObject {
         }
         asrProviderType = providerType
         Self.setASRProviderOverride(rawValue: rawValue)
-        configureASRProvider()
+        configureASRProvider(reason: "provider switch")
         return true
     }
 
@@ -203,6 +224,14 @@ class VoiceInputManager: NSObject {
         return normalized.isEmpty ? nil : normalized
     }
 
+    func currentQwen3ASRModelIDValue() -> String? {
+        guard let qwen3ASRModelID else {
+            return nil
+        }
+        let normalized = qwen3ASRModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
     @discardableResult
     func updateTencentCredentials(secretId: String, secretKey: String) -> Bool {
         let normalizedSecretId = secretId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -216,7 +245,7 @@ class VoiceInputManager: NSObject {
         Self.persistTencentCredentials(secretId: normalizedSecretId, secretKey: normalizedSecretKey)
         rebuildLLMTextOptimizer(logPrefix: "credentials updated")
         if asrProviderType == .tencentCloud {
-            configureASRProvider()
+            configureASRProvider(reason: "tencent credentials updated")
         }
         return true
     }
@@ -244,6 +273,20 @@ class VoiceInputManager: NSObject {
         localLLMModelID = normalizedModelID
         Self.persistLocalLLMModelID(modelID: normalizedModelID)
         rebuildLLMTextOptimizer(logPrefix: "local LLM model updated")
+        return true
+    }
+
+    @discardableResult
+    func updateQwen3ASRModelID(modelID: String) -> Bool {
+        guard let normalizedModelID = Qwen3ASRProvider.normalizedSupportedModelID(from: modelID) else {
+            return false
+        }
+
+        qwen3ASRModelID = normalizedModelID
+        Self.persistQwen3ASRModelID(modelID: normalizedModelID)
+        if asrProviderType == .qwen3Local {
+            configureASRProvider(reason: "Qwen3 model updated")
+        }
         return true
     }
 
@@ -396,11 +439,33 @@ class VoiceInputManager: NSObject {
         UserDefaults.standard.set(modelID, forKey: localLLMModelOverrideKey)
     }
 
-    private func configureASRProvider() {
+    private static func loadPersistedQwen3ASRModelID() -> String? {
+        let defaults = UserDefaults.standard
+        guard let modelID = defaults.string(forKey: qwen3ASRModelOverrideKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !modelID.isEmpty else {
+            return nil
+        }
+        return modelID
+    }
+
+    private static func persistQwen3ASRModelID(modelID: String) {
+        UserDefaults.standard.set(modelID, forKey: qwen3ASRModelOverrideKey)
+    }
+
+    private func configureASRProvider(reason: String) {
         switch asrProviderType {
         case .qwen3Local:
-            asrProvider = Qwen3ASRProvider()
-            AppLog.log("[SmartVoiceIn] ASR provider switched to Qwen3 local model")
+            let qwen3ModelID = currentQwen3ASRModelIDValue() ?? Qwen3ASRProvider.defaultModelID
+            let provider = Qwen3ASRProvider(
+                modelId: qwen3ModelID,
+                statusReporter: { [weak self] status in
+                    self?.onStatusUpdate?(status)
+                }
+            )
+            asrProvider = provider
+            AppLog.log("[SmartVoiceIn] ASR provider switched to Qwen3 local model (\(qwen3ModelID))")
+            prewarmQwen3ASRIfNeeded(provider: provider, modelID: qwen3ModelID, reason: reason)
         case .appleSpeech:
             asrProvider = nil
             AppLog.log("[SmartVoiceIn] ASR provider switched to Apple Speech")
@@ -412,6 +477,21 @@ class VoiceInputManager: NSObject {
             }
             asrProvider = TencentASRProvider(secretId: credentials.secretId, secretKey: credentials.secretKey)
             AppLog.log("[SmartVoiceIn] ASR provider switched to Tencent Cloud")
+        }
+    }
+
+    private func prewarmQwen3ASRIfNeeded(provider: ASRProvider, modelID: String, reason: String) {
+        AppLog.log("[SmartVoiceIn] Qwen3 ASR prewarm started (\(reason), model: \(modelID))")
+        onStatusUpdate?("正在预加载 Qwen3 模型（首次可能较慢）...")
+        provider.prewarm { result in
+            switch result {
+            case .success:
+                AppLog.log("[SmartVoiceIn] Qwen3 ASR prewarm completed (\(reason), model: \(modelID))")
+                self.onStatusUpdate?("Qwen3 模型预加载完成")
+            case .failure(let error):
+                AppLog.log("[SmartVoiceIn] Qwen3 ASR prewarm failed (\(reason), model: \(modelID)): \(error)")
+                self.onStatusUpdate?("Qwen3 模型预加载失败，已使用备用识别")
+            }
         }
     }
 
@@ -540,6 +620,10 @@ class VoiceInputManager: NSObject {
                 AppLog.log("[SmartVoiceIn] \(asrProvider.name) ASR success: \(text)")
                 self?.postProcessRecognizedText(text)
             case .failure(let error):
+                let nsError = error as NSError
+                if nsError.domain == "Qwen3ASRProvider", nsError.code == -4 {
+                    self?.onStatusUpdate?("Qwen3 模型加载中，已回退 Apple Speech")
+                }
                 AppLog.log("[SmartVoiceIn] \(asrProvider.name) ASR failed: \(error), falling back to local")
                 self?.recognizeWithLocalFallback()
             }

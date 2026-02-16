@@ -12,6 +12,7 @@ final class StatusHUD {
     private let verticalPadding: CGFloat = 8
     private let minWidth: CGFloat = 180
     private let maxWidth: CGFloat = 460
+    private let bottomInset: CGFloat = 18
 
     init(initialStatus: String) {
         panel = NSPanel(
@@ -76,7 +77,7 @@ final class StatusHUD {
         let targetScreen = screenForCurrentContext()
         let visible = targetScreen.visibleFrame
         let originX = visible.midX - width / 2
-        let originY = visible.maxY - height - 10
+        let originY = visible.minY + bottomInset
         panel.setFrame(NSRect(x: originX, y: originY, width: width, height: height), display: true)
     }
 
@@ -118,6 +119,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKeyCapturedKeyCodes: [UInt16] = HotKeyManager.defaultShortcutKeyCodes
 
     private var asrProviderMenuItems: [String: NSMenuItem] = [:]
+    private var qwen3ASRModelStatusItem: NSMenuItem?
     private var optimizeProviderMenuItems: [String: NSMenuItem] = [:]
     private var promptTemplateMenuItems: [String: NSMenuItem] = [:]
     private var promptTemplateSubmenu: NSMenu?
@@ -256,6 +258,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         asrProviderMenuItems["tencent_cloud"] = tencentCloudItem
         submenu.addItem(tencentCloudItem)
 
+        submenu.addItem(NSMenuItem.separator())
+        qwen3ASRModelStatusItem = NSMenuItem(title: "Qwen3 模型: 未配置", action: nil, keyEquivalent: "")
+        qwen3ASRModelStatusItem?.isEnabled = false
+        if let qwen3ASRModelStatusItem {
+            submenu.addItem(qwen3ASRModelStatusItem)
+        }
+
+        let qwen3ModelConfigItem = NSMenuItem(title: "设置 Qwen3 模型...", action: #selector(openQwen3ASRModelConfiguration), keyEquivalent: "")
+        qwen3ModelConfigItem.target = self
+        submenu.addItem(qwen3ModelConfigItem)
+
         parent.submenu = submenu
         return parent
     }
@@ -274,6 +287,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let displayName = selected.flatMap { asrProviderPresentations[$0] }?.displayName ?? "未知引擎"
         let badge = selected.flatMap { asrProviderPresentations[$0] }?.badge ?? "ASR"
         currentASRProviderStatusItem?.title = "当前引擎: \(displayName)"
+        let qwen3ModelID = voiceInputManager?.currentQwen3ASRModelIDValue() ?? Qwen3ASRProvider.defaultModelID
+        qwen3ASRModelStatusItem?.title = "Qwen3 模型: \(qwen3ModelID)"
 
         if let button = statusItem.button {
             button.title = badge
@@ -953,6 +968,72 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         refreshTextOptimizeCredentialStatusUI()
         updateStatus("本地模型已保存并应用: \(modelID.trimmingCharacters(in: .whitespacesAndNewlines))")
+    }
+
+    @objc private func openQwen3ASRModelConfiguration() {
+        guard voiceInputManager != nil else {
+            updateStatus("配置未就绪，请稍后重试")
+            return
+        }
+        hotKeyManager?.setEnabled(false)
+        defer {
+            hotKeyManager?.setEnabled(true)
+        }
+
+        let existingModelID = voiceInputManager.currentQwen3ASRModelIDValue() ?? Qwen3ASRProvider.defaultModelID
+
+        let alert = NSAlert()
+        alert.messageText = "Qwen3 ASR 模型设置"
+        alert.informativeText = "输入 Hugging Face 模型 ID，保存后将持久化到本地并立即应用。支持：mlx-community/Qwen3-ASR-0.6B-4bit / mlx-community/Qwen3-ASR-1.7B-8bit"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "保存并应用")
+        alert.addButton(withTitle: "取消")
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 620, height: 84))
+        accessory.translatesAutoresizingMaskIntoConstraints = false
+
+        let modelIDLabel = NSTextField(labelWithString: "Model ID")
+        modelIDLabel.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(modelIDLabel)
+
+        let modelIDField = NSTextField(string: existingModelID)
+        modelIDField.placeholderString = Qwen3ASRProvider.defaultModelID
+        modelIDField.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(modelIDField)
+
+        NSLayoutConstraint.activate([
+            accessory.widthAnchor.constraint(equalToConstant: 620),
+            modelIDLabel.topAnchor.constraint(equalTo: accessory.topAnchor),
+            modelIDLabel.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
+            modelIDLabel.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+
+            modelIDField.topAnchor.constraint(equalTo: modelIDLabel.bottomAnchor, constant: 6),
+            modelIDField.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
+            modelIDField.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+            modelIDField.widthAnchor.constraint(equalToConstant: 620),
+            modelIDField.bottomAnchor.constraint(equalTo: accessory.bottomAnchor)
+        ])
+
+        alert.accessoryView = accessory
+        let localModelWindow = alert.window
+        localModelWindow.initialFirstResponder = modelIDField
+        localModelWindow.makeFirstResponder(modelIDField)
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard runModalAlertWithEditingShortcuts(alert, preferredFirstResponder: modelIDField) == .alertFirstButtonReturn else {
+            updateStatus("已取消 Qwen3 模型更新")
+            return
+        }
+
+        let modelID = modelIDField.stringValue
+        guard voiceInputManager.updateQwen3ASRModelID(modelID: modelID) else {
+            updateStatus("保存失败：仅支持 0.6B-4bit 或 1.7B-8bit")
+            return
+        }
+
+        refreshASRProviderUI()
+        let appliedModelID = voiceInputManager.currentQwen3ASRModelIDValue() ?? Qwen3ASRProvider.defaultModelID
+        updateStatus("Qwen3 模型已保存并应用: \(appliedModelID)")
     }
 
     private func setupHotKey() {
