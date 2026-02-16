@@ -26,6 +26,10 @@ xcuserdata/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 
+# Explicit user-state files
+VoiceInput.xcodeproj/project.xcworkspace/xcuserdata/smart.xcuserdatad/UserInterfaceState.xcuserstate
+VoiceInput.xcodeproj/xcuserdata/smart.xcuserdatad/xcschemes/xcschememanagement.plist
+
 # Swift Package Manager
 .build/
 .swiftpm/
