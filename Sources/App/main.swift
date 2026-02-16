@@ -61,6 +61,10 @@ final class StatusHUD {
         panel.orderFrontRegardless()
     }
 
+    func hide() {
+        panel.orderOut(nil)
+    }
+
     private func resizeAndReposition(for status: String) {
         let textWidth = ceil((status as NSString).size(withAttributes: [.font: statusLabel.font as Any]).width)
         let width = min(max(textWidth + horizontalPadding * 2, minWidth), maxWidth)
@@ -110,6 +114,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var asrProviderMenuItems: [String: NSMenuItem] = [:]
     private var optimizeProviderMenuItems: [String: NSMenuItem] = [:]
     private var tencentCredentialStatusItem: NSMenuItem?
+    private var statusHUDAutoHideWorkItem: DispatchWorkItem?
     private let asrProviderPresentations: [String: ASRProviderPresentation] = [
         "qwen3_local": ASRProviderPresentation(displayName: "Qwen3 本地模型", badge: "Q3"),
         "apple_speech": ASRProviderPresentation(displayName: "Apple Speech", badge: "SP"),
@@ -195,7 +200,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     case .success(let text):
                         self?.insertText(text)
                         let providerName = self?.currentASRProviderDisplayName() ?? "未知引擎"
-                        self?.updateStatus("识别成功(\(providerName)): \(text)")
+                        self?.updateStatus("识别成功(\(providerName)): \(text)", autoHideAfter: 5)
                     case .failure(let error):
                         let providerName = self?.currentASRProviderDisplayName() ?? "未知引擎"
                         self?.updateStatus("识别失败(\(providerName)): \(error.localizedDescription)")
@@ -745,11 +750,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         keyUp?.post(tap: .cghidEventTap)
     }
 
-    private func updateStatus(_ status: String) {
+    private func updateStatus(_ status: String, autoHideAfter: TimeInterval? = nil) {
+        statusHUDAutoHideWorkItem?.cancel()
+        statusHUDAutoHideWorkItem = nil
+
         if let menu = statusItem.menu, menu.items.count > 0 {
             menu.items[0].title = "状态: \(status)"
         }
         statusHUD?.update(status: status)
+
+        guard let autoHideAfter, autoHideAfter > 0 else {
+            return
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.statusHUD?.hide()
+            self?.statusHUDAutoHideWorkItem = nil
+        }
+        statusHUDAutoHideWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + autoHideAfter, execute: workItem)
     }
 
     private func updateMenuItem(title: String) {
