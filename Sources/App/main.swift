@@ -270,15 +270,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         asrProviderMenuItems["qwen3_local"] = qwen3Item
         submenu.addItem(qwen3Item)
 
-        let appleSpeechItem = NSMenuItem(title: "Apple Speech", action: #selector(selectAppleSpeechProvider), keyEquivalent: "")
-        appleSpeechItem.target = self
-        asrProviderMenuItems["apple_speech"] = appleSpeechItem
-        submenu.addItem(appleSpeechItem)
-
         let tencentCloudItem = NSMenuItem(title: "腾讯云 ASR", action: #selector(selectTencentCloudProvider), keyEquivalent: "")
         tencentCloudItem.target = self
         asrProviderMenuItems["tencent_cloud"] = tencentCloudItem
         submenu.addItem(tencentCloudItem)
+
+        let appleSpeechItem = NSMenuItem(title: "Apple Speech", action: #selector(selectAppleSpeechProvider), keyEquivalent: "")
+        appleSpeechItem.target = self
+        asrProviderMenuItems["apple_speech"] = appleSpeechItem
+        submenu.addItem(appleSpeechItem)
 
         submenu.addItem(NSMenuItem.separator())
         qwen3ASRModelStatusItem = NSMenuItem(title: "Qwen3 模型: 未配置", action: nil, keyEquivalent: "")

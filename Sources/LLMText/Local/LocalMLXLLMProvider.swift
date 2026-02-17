@@ -56,6 +56,7 @@ final class LocalMLXLLMProvider: LLMTextOptimizeProvider, @unchecked Sendable {
     static let rawValue = "local_mlx"
     static let displayName = "本地 MLX (可配置)"
 
+    private let modelId: String
     private let modelStore: LocalMLXModelStore
     private let generateParameters: GenerateParameters
 
@@ -75,6 +76,7 @@ final class LocalMLXLLMProvider: LLMTextOptimizeProvider, @unchecked Sendable {
         let configuredTopP = Double(env["VOICEINPUT_LOCAL_LLM_TOP_P"] ?? "") ?? 0.95
         let topP = min(max(configuredTopP, 0), 1)
 
+        self.modelId = modelId
         self.modelStore = LocalMLXModelStore(modelId: modelId)
         self.generateParameters = GenerateParameters(
             maxTokens: maxTokens,
@@ -129,6 +131,10 @@ final class LocalMLXLLMProvider: LLMTextOptimizeProvider, @unchecked Sendable {
                 relay.resolve(.failure(error))
             }
         }
+    }
+
+    func providerModelIdentifier() -> String? {
+        return modelId
     }
 }
 

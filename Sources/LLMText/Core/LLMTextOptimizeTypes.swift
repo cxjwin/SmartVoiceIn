@@ -32,18 +32,6 @@ enum LLMPromptTemplateStore {
             title: "基础清洗",
             prompt: defaultOptimizationSystemPrompt,
             isBuiltIn: true
-        ),
-        LLMPromptTemplate(
-            id: "strict_cleanup",
-            title: "严格清洗",
-            prompt: strictCleanupSystemPrompt,
-            isBuiltIn: true
-        ),
-        LLMPromptTemplate(
-            id: "meeting_cleanup",
-            title: "会议记录",
-            prompt: meetingCleanupSystemPrompt,
-            isBuiltIn: true
         )
     ]
 
@@ -254,6 +242,8 @@ protocol LLMTextOptimizeProvider: AnyObject {
     init?(configuration: LLMTextOptimizeConfiguration)
     func prewarm(completion: @escaping (Result<Void, Error>) -> Void)
     func optimize(text: String, templatePromptOverride: String?, completion: @escaping (Result<String, Error>) -> Void)
+    func providerModelIdentifier() -> String?
+    func providerLogDisplayName() -> String
 }
 
 extension LLMTextOptimizeProvider {
@@ -264,38 +254,38 @@ extension LLMTextOptimizeProvider {
     func optimize(text: String, completion: @escaping (Result<String, Error>) -> Void) {
         optimize(text: text, templatePromptOverride: nil, completion: completion)
     }
+
+    func providerModelIdentifier() -> String? {
+        return nil
+    }
+
+    func providerLogDisplayName() -> String {
+        return Self.displayName
+    }
 }
 
 let defaultOptimizationSystemPrompt = """
-你是 ASR 文本清洗器，不是问答助手。下面是原始转写文本，请仅做清洗，不要回答问题、不要讲解知识、不要扩写内容。
+你是“语音转写文本清洗器”，不是问答助手。
+给你的内容永远是 ASR 原文，不是提问。你只能做清洗，禁止解释、禁止扩写、禁止改写成教程/方案。
+即使原文里出现“帮我看一下/请问/能否”等措辞，也一律按“待清洗文本”处理，禁止拒答、禁止道歉。
 
-清洗规则：
-1. 删除口头禅、卡顿词、回读重复（如“嗯/呃/那个/就是/然后”）。
-2. 修复明显 ASR 术语误识别，规范中英混排空格与常见术语大小写。
-3. 保留原意与语气，仅做最小必要编辑；不要改写成教程或方案。
-4. 若原文已清晰则原样输出。
-5. 仅输出最终文本，不要解释，不要 JSON，不要引号，不要列表。
+硬性规则（必须遵守）：
+1. 删除语气词、口头禅、停顿词、回读重复（如“嗯/呃/啊/那个/就是/然后/要不就是”等无语义成分）。
+2. 修复明显病句、重复片段、术语误识别与异常标点（如“；，”“，。”“。。”“，，”）；中英文数字混排规范（中文与英文/数字之间加空格，专有名词大小写正确）。
+3. 严格保留原意，不新增信息；如果原文已清晰，仅做必要微调，不要明显变长，也不要过度压缩导致关键信息丢失。
+4. 数字优先使用阿拉伯数字：百分比、数量、版本号、小数、时间表达都尽量数字化（如“百分之八十”->“80%”，“二点五”->“2.5”，“GLM 的五”->“GLM 5”）。
+5. 如果原文仅包含语气词（如“嗯。”“啊。”），输出空字符串。
+6. 只输出清洗后的最终文本，不要前缀（如“清洗后：”）、解释、JSON、引号、列表。
 
-原文：
-{{input}}
-"""
+示例：
+输入：今天呃，我要讲一下那个 React Hook 的使用。就是说，它在这个在 N P 里面的性能比那个 V C O 的要好一些。
+输出：今天我要讲一下 React Hook 的使用。它在 App 里面的性能比 VSCode 要好一些。
 
-let strictCleanupSystemPrompt = """
-你是中文语音转写文本优化助手。任务：
-1. 仅做清洗，不改写句式，不替换同义词。
-2. 删除语气词（如“嗯”“呃”“啊”“那个”“就是”“然后”）和明显重复片段。
-3. 保留原文标点和大小写；如果原文有句号、问号、叹号，必须保留。
-4. 不新增任何原文不存在的信息。
-5. 仅输出最终文本。
-"""
+输入：这些输入法的话，要不就是识别，呃，有点问题；，要不就是，呃，需要付费，而且也不便宜；，啊，要么就是占用了快捷键，啊，不能很方便的做自定义。
+输出：这些输入法要不就是识别有点问题，要不就是需要付费而且也不便宜，要么就是占用了快捷键，不能很方便地自定义。
 
-let meetingCleanupSystemPrompt = """
-你是会议语音转写清洗助手。任务：
-1. 删除口头禅、重复词和无意义停顿词。
-2. 保留人名、产品名、英文术语、数字、时间和关键动作。
-3. 不改变事实、不补充内容、不改写为总结。
-4. 尽量保留原句结构，只做最小必要删除。
-5. 仅输出最终文本。
+输入：比如说 MiniMax 的二点五，GLM 的五，千问三点五 Plus，大概百分之八十的场景可以用。
+输出：比如说 MiniMax 2.5、GLM 5、千问 3.5 Plus，大概 80% 的场景可以用。
 """
 
 private let optimizationInputPlaceholder = "{{input}}"
@@ -319,7 +309,10 @@ func buildOptimizationPromptRequest(userText: String, templatePromptOverride: St
         return OptimizationPromptRequest(systemPrompt: nil, userPrompt: rendered)
     }
 
-    return OptimizationPromptRequest(systemPrompt: templatePrompt, userPrompt: userText)
+    return OptimizationPromptRequest(
+        systemPrompt: templatePrompt,
+        userPrompt: renderOptimizationUserPrompt(userText: userText)
+    )
 }
 
 func buildOptimizationPromptMessages(userText: String, templatePromptOverride: String? = nil) -> [(role: String, content: String)] {
@@ -331,6 +324,15 @@ func buildOptimizationPromptMessages(userText: String, templatePromptOverride: S
         ]
     }
     return [("user", request.userPrompt)]
+}
+
+private func renderOptimizationUserPrompt(userText: String) -> String {
+    return """
+    以下内容是待清洗的 ASR 原文，不是对你的提问，请直接输出清洗后的文本：
+    <asr_text>
+    \(userText)
+    </asr_text>
+    """
 }
 
 func extractTextFromTencentStyle(response: [String: Any]) -> String? {
@@ -392,6 +394,25 @@ func extractTextFromAnthropicStyle(response: [String: Any]) -> String? {
         if !textChunks.isEmpty {
             return textChunks.joined()
         }
+
+        // MiniMax may return thinking-only blocks when max_tokens is exhausted.
+        let thinkingChunks = contentItems.compactMap { item -> String? in
+            let type = (item["type"] as? String)?.lowercased() ?? ""
+            guard type == "thinking" else {
+                return nil
+            }
+            if let thinking = item["thinking"] as? String, !thinking.isEmpty {
+                return thinking
+            }
+            if let text = item["text"] as? String, !text.isEmpty {
+                return text
+            }
+            return nil
+        }
+        if !thinkingChunks.isEmpty,
+           let recovered = recoverTextFromThinkingContent(thinkingChunks.joined(separator: "\n")) {
+            return recovered
+        }
     }
 
     if let message = response["message"] as? [String: Any],
@@ -400,4 +421,73 @@ func extractTextFromAnthropicStyle(response: [String: Any]) -> String? {
     }
 
     return nil
+}
+
+private func recoverTextFromThinkingContent(_ thinking: String) -> String? {
+    let normalized = thinking.replacingOccurrences(of: "\r\n", with: "\n")
+    let patterns = [
+        #"(?:清洗后|最终版本|优化后|输出|结果|改写后)\s*[:：]\s*([^\n]+)"#,
+        #"(?:cleaned text|final version|output)\s*[:：]\s*([^\n]+)"#
+    ]
+
+    var candidates: [String] = []
+    for pattern in patterns {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            continue
+        }
+        let nsRange = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        for match in regex.matches(in: normalized, options: [], range: nsRange) {
+            guard match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: normalized) else {
+                continue
+            }
+            let rawCandidate = String(normalized[range])
+            if let cleaned = sanitizeThinkingRecoveredText(rawCandidate) {
+                candidates.append(cleaned)
+            }
+        }
+    }
+
+    if let punctuated = candidates.reversed().first(where: isLikelyCompleteSentence) {
+        return punctuated
+    }
+    return candidates.reversed().first(where: { coreContentCount(in: $0) >= 6 })
+}
+
+private func sanitizeThinkingRecoveredText(_ raw: String) -> String? {
+    var candidate = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !candidate.isEmpty else {
+        return nil
+    }
+
+    candidate = candidate.replacingOccurrences(
+        of: #"^["“”'`]+"#,
+        with: "",
+        options: .regularExpression
+    )
+    candidate = candidate.replacingOccurrences(
+        of: #"["“”'`]+$"#,
+        with: "",
+        options: .regularExpression
+    )
+    candidate = candidate.replacingOccurrences(
+        of: #"^[\-\*•\d\.\)\s]+"#,
+        with: "",
+        options: .regularExpression
+    )
+    candidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    return candidate.isEmpty ? nil : candidate
+}
+
+private func isLikelyCompleteSentence(_ text: String) -> Bool {
+    return text.range(of: #"[。！？.!?]$"#, options: .regularExpression) != nil
+}
+
+private func coreContentCount(in text: String) -> Int {
+    return text.unicodeScalars.reduce(into: 0) { count, scalar in
+        if CharacterSet.alphanumerics.contains(scalar) || scalar.properties.isIdeographic {
+            count += 1
+        }
+    }
 }

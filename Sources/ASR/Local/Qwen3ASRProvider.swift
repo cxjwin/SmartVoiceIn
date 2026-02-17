@@ -104,11 +104,23 @@ final class Qwen3ASRProvider: ASRProvider, @unchecked Sendable {
     static let legacyUnsupportedLargeModelID = "mlx-community/Qwen3-ASR-1.7B-4bit"
     static let supportedModelIDs: [String] = [defaultModelID, largeModelID]
     private let modelStore: Qwen3ModelStore
+    private let baseMaxTokens: Int
+    private let maxTokensCap: Int
+    private let tokensPerSecond: Int
 
     init(
         modelId: String = ProcessInfo.processInfo.environment["VOICEINPUT_QWEN3_MODEL"] ?? defaultModelID,
         statusReporter: ((String) -> Void)? = nil
     ) {
+        let environment = ProcessInfo.processInfo.environment
+        let configuredBaseMaxTokens = Int(environment["VOICEINPUT_QWEN3_ASR_MAX_TOKENS"] ?? "") ?? 448
+        let configuredMaxTokensCap = Int(environment["VOICEINPUT_QWEN3_ASR_MAX_TOKENS_CAP"] ?? "") ?? 1536
+        let configuredTokensPerSecond = Int(environment["VOICEINPUT_QWEN3_ASR_TOKENS_PER_SECOND"] ?? "") ?? 20
+
+        self.baseMaxTokens = max(128, configuredBaseMaxTokens)
+        self.maxTokensCap = max(self.baseMaxTokens, configuredMaxTokensCap)
+        self.tokensPerSecond = max(8, configuredTokensPerSecond)
+
         let statusRelay = statusReporter.map(StatusRelay.init)
         self.modelStore = Qwen3ModelStore(modelId: modelId, statusRelay: statusRelay)
     }
@@ -171,8 +183,14 @@ final class Qwen3ASRProvider: ASRProvider, @unchecked Sendable {
                 }
 
                 let model = try await self.modelStore.model()
+                let dynamicMaxTokens = self.estimatedMaxTokens(
+                    audioByteCount: audioPCMData.count,
+                    sampleRate: sampleRate,
+                    channels: channels,
+                    bitsPerSample: bitsPerSample
+                )
                 let text = model
-                    .transcribe(audio: samples, sampleRate: sampleRate)
+                    .transcribe(audio: samples, sampleRate: sampleRate, maxTokens: dynamicMaxTokens)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else {
                     throw NSError(
@@ -233,5 +251,28 @@ final class Qwen3ASRProvider: ASRProvider, @unchecked Sendable {
         }
 
         return samples
+    }
+
+    private func estimatedMaxTokens(
+        audioByteCount: Int,
+        sampleRate: Int,
+        channels: Int,
+        bitsPerSample: Int
+    ) -> Int {
+        let bits = max(bitsPerSample, 1)
+        let safeChannels = max(channels, 1)
+        let bytesPerSecond = (sampleRate * safeChannels * bits) / 8
+        guard bytesPerSecond > 0 else {
+            return baseMaxTokens
+        }
+
+        let durationSeconds = Double(audioByteCount) / Double(bytesPerSecond)
+        let dynamicTokens = Int(ceil(durationSeconds * Double(tokensPerSecond)))
+        let resolved = min(max(baseMaxTokens, dynamicTokens), maxTokensCap)
+
+        if resolved > baseMaxTokens {
+            AppLog.log("[Qwen3ASR] Extended maxTokens to \(resolved) for \(String(format: "%.1f", durationSeconds))s audio")
+        }
+        return resolved
     }
 }

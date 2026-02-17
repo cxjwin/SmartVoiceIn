@@ -41,7 +41,7 @@ final class TencentHunyuanLLMProvider: LLMTextOptimizeProvider, @unchecked Senda
         self.secretId = secretId
         self.secretKey = secretKey
         self.region = env["VOICEINPUT_TENCENT_REGION"] ?? "ap-guangzhou"
-        self.model = configuredModel.isEmpty ? "hunyuan-lite" : configuredModel
+        self.model = configuredModel.isEmpty ? "hunyuan-standard" : configuredModel
         self.endpoint = endpoint
         self.timeout = configuration.timeout
         let configuredTemperature = Double(env["VOICEINPUT_LLM_TEMPERATURE"] ?? "") ?? 0.8
@@ -181,5 +181,9 @@ final class TencentHunyuanLLMProvider: LLMTextOptimizeProvider, @unchecked Senda
             }
         }
         return Data(result)
+    }
+
+    func providerModelIdentifier() -> String? {
+        return model
     }
 }

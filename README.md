@@ -9,10 +9,12 @@
   - 支持 `1` 键或 `2` 键组合
   - 区分左/右修饰键（例如左 Command、右 Command）
   - 配置弹窗提供 `应用` 与 `取消`（取消会恢复默认右 Command）
+- 提供统一 `设置...` 入口：
+  - 集中管理快捷键、Qwen3 ASR 模型、本地 LLM 模型、云端 Key 等配置
 - 菜单可切换语音识别引擎：
   - `Qwen3 本地模型`
-  - `Apple Speech`
   - `腾讯云 ASR`
+  - `Apple Speech`
 - Qwen3 ASR 模型可配置：
   - 支持输入/切换 Hugging Face 模型 ID
   - 保存后持久化到本地并立即应用
@@ -23,14 +25,16 @@
 - 识别后文本后处理：
   - 优先 LLM 优化（可切换提供方）
   - 失败自动回退原始识别文本
+  - 对明显拒答/过度压缩结果自动回退原文，避免错误输出
 - 菜单可切换文本优化模型提供方：
-  - `本地 MLX (Qwen2.5-0.5B)`（默认）
-  - `MiniMax`
+  - `本地 MLX (可配置)`（默认）
   - `腾讯混元`
+  - `MiniMax`
 - 菜单支持提示词模板管理：
-  - 内置模板：`基础清洗`、`严格清洗`、`会议记录`
+  - 内置模板：`基础清洗`
   - 支持新增、编辑、删除、导入、导出模板
   - 支持按模板切换
+  - 默认模板已精简；数字标准化（如 `二点五 -> 2.5`）由提示词约束驱动
 - 菜单支持腾讯云密钥配置：
   - 支持输入/更新 `SecretId`、`SecretKey`
   - 保存后持久化到本地并立即生效
@@ -63,6 +67,9 @@
 ## 本地 ASR 配置（Qwen3）
 
 - `VOICEINPUT_QWEN3_MODEL=mlx-community/Qwen3-ASR-0.6B-4bit`（可选，默认值）
+- `VOICEINPUT_QWEN3_ASR_MAX_TOKENS=448`（可选，基础解码上限）
+- `VOICEINPUT_QWEN3_ASR_MAX_TOKENS_CAP=1536`（可选，动态扩展上限）
+- `VOICEINPUT_QWEN3_ASR_TOKENS_PER_SECOND=20`（可选，按音频时长估算的解码速率）
 - 支持模型：
   - `mlx-community/Qwen3-ASR-0.6B-4bit`
   - `mlx-community/Qwen3-ASR-1.7B-8bit`
@@ -70,6 +77,9 @@
 
 首次识别时会自动下载模型到 HuggingFace 本地缓存，后续离线可直接使用本地模型。
 也可在菜单栏 `语音识别引擎 -> 设置 Qwen3 模型...` 手动切换模型，保存后会持久化并在下次启动继续生效。
+
+说明：
+- Qwen3 ASR 的文本解码上限会根据录音时长自动扩展（长语音减少尾部截断风险）。
 
 ## ASR 引擎配置（可选）
 
@@ -81,6 +91,7 @@
 - 也可以在菜单栏 `语音识别引擎` 中切换。
 - 菜单切换会写入 `UserDefaults`，优先级高于环境变量。
 - 使用 `tencent_cloud` 时，需要可用的腾讯云密钥（菜单配置或环境变量）。
+- 相关配置建议在菜单栏 `设置...` 中统一管理。
 
 ## 构建
 
@@ -163,7 +174,7 @@ cd /Users/smart/Desktop/demo/VoiceInput
 - `VOICEINPUT_TENCENT_SECRET_KEY=...`（必填）
 - `VOICEINPUT_LLM_ENDPOINT=https://hunyuan.tencentcloudapi.com`（可选）
 - `VOICEINPUT_TENCENT_REGION=ap-guangzhou`（可选）
-- `VOICEINPUT_LLM_MODEL=hunyuan-lite`（可选）
+- `VOICEINPUT_LLM_MODEL=hunyuan-standard`（可选，默认）
 - `VOICEINPUT_LLM_TIMEOUT=6`（可选）
 - `VOICEINPUT_LLM_TEMPERATURE=0.8`（可选，默认 `0.8`）
 
@@ -181,13 +192,19 @@ cd /Users/smart/Desktop/demo/VoiceInput
 - `VOICEINPUT_LLM_TIMEOUT=6`（可选）
 - `VOICEINPUT_LLM_TEMPERATURE=0.8`（可选，范围建议 `0.01~1.0`，默认 `0.8`）
 - `VOICEINPUT_MINIMAX_TOP_P=0.95`（可选，默认 `0.95`）
-- `VOICEINPUT_MINIMAX_MAX_TOKENS=256`（可选，默认 `256`，兼容旧变量 `VOICEINPUT_MINIMAX_MAX_COMPLETION_TOKENS`）
+- `VOICEINPUT_MINIMAX_THINKING=off`（可选，默认关闭；可设为 `on`）
 - `VOICEINPUT_MINIMAX_ANTHROPIC_VERSION=2023-06-01`（可选）
+
+说明：
+- MiniMax 请求不再显式传 `max_tokens`，使用服务端默认值。
+- 默认关闭 thinking（`thinking.type=disabled`），以优先降低延迟；如需开启可设置 `VOICEINPUT_MINIMAX_THINKING=on`。
 
 ## 提示词模板说明
 
 - 入口：菜单栏 `文本优化模型 -> 提示词模板`
 - 模板包含 `title` + `prompt` 两部分，支持按场景切换。
+- 内置模板当前仅保留 `基础清洗`，其余建议通过自定义模板扩展。
+- 数字规范（如 `二点五 -> 2.5`、`百分之八十 -> 80%`）默认通过模板提示词约束，不做代码硬编码替换。
 - 模板渲染规则：
   - 如果模板包含 `{{input}}`，会先把原文替换进去，再作为单条用户消息发送给 LLM。
   - 如果模板不包含 `{{input}}`，会把模板作为 `system` 指令，原文作为 `user` 内容发送。

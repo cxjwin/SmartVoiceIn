@@ -4,6 +4,11 @@ final class MiniMaxLLMProvider: LLMTextOptimizeProvider, @unchecked Sendable {
     static let rawValue = "minimax_text"
     static let displayName = "MiniMax"
 
+    private enum ThinkingMode {
+        case disabled
+        case enabled
+    }
+
     private let endpoint: URL
     private let timeout: TimeInterval
     private let apiKey: String
@@ -11,7 +16,7 @@ final class MiniMaxLLMProvider: LLMTextOptimizeProvider, @unchecked Sendable {
     private let model: String
     private let temperature: Double
     private let topP: Double
-    private let maxTokens: Int
+    private let thinkingMode: ThinkingMode
 
     required init?(configuration: LLMTextOptimizeConfiguration) {
         let env = configuration.environment
@@ -32,9 +37,15 @@ final class MiniMaxLLMProvider: LLMTextOptimizeProvider, @unchecked Sendable {
         let modelRaw = env["VOICEINPUT_MINIMAX_MODEL"] ?? ""
         let configuredTemperature = Double(env["VOICEINPUT_LLM_TEMPERATURE"] ?? "") ?? 0.8
         let configuredTopP = Double(env["VOICEINPUT_MINIMAX_TOP_P"] ?? "") ?? 0.95
-        let configuredMaxTokens = Int(env["VOICEINPUT_MINIMAX_MAX_TOKENS"] ?? "")
-            ?? Int(env["VOICEINPUT_MINIMAX_MAX_COMPLETION_TOKENS"] ?? "")
-            ?? 256
+
+        let thinkingRaw = (env["VOICEINPUT_MINIMAX_THINKING"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let thinkingMode: ThinkingMode
+        switch thinkingRaw {
+        case "1", "true", "on", "enabled":
+            thinkingMode = .enabled
+        default:
+            thinkingMode = .disabled
+        }
 
         self.endpoint = endpoint
         self.timeout = configuration.timeout
@@ -43,7 +54,7 @@ final class MiniMaxLLMProvider: LLMTextOptimizeProvider, @unchecked Sendable {
         self.model = modelRaw.isEmpty ? "MiniMax-M2.5-highspeed" : modelRaw
         self.temperature = min(max(configuredTemperature, 0.01), 1.0)
         self.topP = min(max(configuredTopP, 0), 1)
-        self.maxTokens = max(32, configuredMaxTokens)
+        self.thinkingMode = thinkingMode
     }
 
     func optimize(text: String, templatePromptOverride: String?, completion: @escaping (Result<String, Error>) -> Void) {
@@ -69,12 +80,18 @@ final class MiniMaxLLMProvider: LLMTextOptimizeProvider, @unchecked Sendable {
             ],
             "temperature": temperature,
             "top_p": topP,
-            "max_tokens": maxTokens,
             "stream": false
         ]
 
         if let systemPrompt = prompt.systemPrompt, !systemPrompt.isEmpty {
             bodyObject["system"] = systemPrompt
+        }
+
+        switch thinkingMode {
+        case .disabled:
+            bodyObject["thinking"] = ["type": "disabled"]
+        case .enabled:
+            bodyObject["thinking"] = ["type": "enabled"]
         }
 
         let bodyData: Data
@@ -136,10 +153,23 @@ final class MiniMaxLLMProvider: LLMTextOptimizeProvider, @unchecked Sendable {
                 }
 
                 let responseString = String(data: data, encoding: .utf8) ?? "Unable to decode"
-                relay.resolve(.failure(NSError(domain: "LLMTextOptimizer", code: -34, userInfo: [NSLocalizedDescriptionKey: "MiniMax 响应不含文本: \(responseString)"])))
+                let snippet = String(responseString.prefix(600))
+                relay.resolve(
+                    .failure(
+                        NSError(
+                            domain: "LLMTextOptimizer",
+                            code: -34,
+                            userInfo: [NSLocalizedDescriptionKey: "MiniMax 响应不含文本（可能仅返回 thinking）: \(snippet)"]
+                        )
+                    )
+                )
             } catch {
                 relay.resolve(.failure(error))
             }
         }.resume()
+    }
+
+    func providerModelIdentifier() -> String? {
+        return model
     }
 }

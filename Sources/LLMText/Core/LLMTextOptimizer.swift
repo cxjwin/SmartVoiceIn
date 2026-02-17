@@ -9,8 +9,8 @@ final class LLMTextOptimizer: @unchecked Sendable {
     private static let providerOverrideKey = "voiceinput.llm.provider.override"
     nonisolated(unsafe) private static let providerTypes: [LLMTextOptimizeProvider.Type] = [
         LocalMLXLLMProvider.self,
-        MiniMaxLLMProvider.self,
-        TencentHunyuanLLMProvider.self
+        TencentHunyuanLLMProvider.self,
+        MiniMaxLLMProvider.self
     ]
 
     static var providerOptions: [ProviderOption] {
@@ -171,6 +171,16 @@ final class LLMTextOptimizer: @unchecked Sendable {
             case .success(let outputText):
                 self.markActivityNow()
                 let normalized = self.normalizeOutput(outputText)
+                if self.isLikelyModelRefusal(output: normalized, input: cleanedInput) {
+                    AppLog.log("[LLMTextOptimizer] Output looks like refusal, fallback to original text")
+                    completion(.success(cleanedInput))
+                    return
+                }
+                if self.shouldFallbackToOriginal(input: cleanedInput, output: normalized) {
+                    AppLog.log("[LLMTextOptimizer] Output is over-compressed, fallback to original text")
+                    completion(.success(cleanedInput))
+                    return
+                }
                 completion(.success(normalized))
             case .failure(let error):
                 completion(.failure(error))
@@ -180,6 +190,15 @@ final class LLMTextOptimizer: @unchecked Sendable {
 
     func providerDisplayName() -> String {
         return Self.displayName(for: providerRawValue) ?? providerRawValue
+    }
+
+    func providerLogDescription() -> String {
+        let displayName = provider.providerLogDisplayName()
+        guard let modelID = provider.providerModelIdentifier()?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !modelID.isEmpty else {
+            return displayName
+        }
+        return "\(displayName) [\(modelID)]"
     }
 
     private func markActivityNow() {
@@ -211,4 +230,88 @@ final class LLMTextOptimizer: @unchecked Sendable {
 
         return unwrapped
     }
+
+    private func shouldFallbackToOriginal(input: String, output: String) -> Bool {
+        if output.isEmpty {
+            return !isLikelyFillerOnly(input)
+        }
+
+        let inputCoreCount = coreCharacterCount(in: input)
+        let outputCoreCount = coreCharacterCount(in: output)
+
+        // For non-trivial input, reject suspiciously short outputs to avoid meaning loss.
+        if inputCoreCount >= 20 {
+            if outputCoreCount <= 6 {
+                return true
+            }
+            let ratio = Double(outputCoreCount) / Double(inputCoreCount)
+            if ratio < 0.2 {
+                return true
+            }
+        } else if inputCoreCount >= 12, outputCoreCount <= 3 {
+            return true
+        }
+
+        return false
+    }
+
+    private func isLikelyModelRefusal(output: String, input: String) -> Bool {
+        let normalizedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedOutput.isEmpty else {
+            return false
+        }
+
+        let markers = [
+            "对不起，我无法",
+            "抱歉，我无法",
+            "我无法提供帮助",
+            "我不能提供帮助",
+            "无法提供帮助",
+            "作为ai",
+            "作为一个ai",
+            "我无法协助",
+            "我不能协助",
+            "我无法回答",
+            "i'm sorry",
+            "i am sorry",
+            "i cannot help",
+            "i can't help",
+            "as an ai"
+        ]
+
+        guard markers.contains(where: { normalizedOutput.contains($0) }) else {
+            return false
+        }
+
+        let normalizedInput = input.lowercased()
+        // Only treat as refusal when marker is introduced by the model (not present in source text).
+        let introducedByModel = markers.contains { marker in
+            normalizedOutput.contains(marker) && !normalizedInput.contains(marker)
+        }
+        guard introducedByModel else {
+            return false
+        }
+
+        // Refusal replies are usually short and non-content preserving.
+        return coreCharacterCount(in: output) <= max(24, coreCharacterCount(in: input) / 2)
+    }
+
+    private func isLikelyFillerOnly(_ text: String) -> Bool {
+        var candidate = text.lowercased()
+        let fillerTerms = [
+            "嗯", "呃", "啊", "额", "哦", "唉", "诶", "那个", "这个",
+            "就是", "然后", "的话", "吧", "呀", "嘛"
+        ]
+        fillerTerms.forEach { candidate = candidate.replacingOccurrences(of: $0, with: "") }
+        return coreCharacterCount(in: candidate) == 0
+    }
+
+    private func coreCharacterCount(in text: String) -> Int {
+        return text.unicodeScalars.reduce(into: 0) { count, scalar in
+            if CharacterSet.alphanumerics.contains(scalar) || scalar.properties.isIdeographic {
+                count += 1
+            }
+        }
+    }
+
 }

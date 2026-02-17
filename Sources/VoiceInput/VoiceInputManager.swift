@@ -18,8 +18,8 @@ class VoiceInputManager: NSObject {
 
     static let supportedASRProviderRawValues = [
         ASRProviderType.qwen3Local.rawValue,
-        ASRProviderType.appleSpeech.rawValue,
-        ASRProviderType.tencentCloud.rawValue
+        ASRProviderType.tencentCloud.rawValue,
+        ASRProviderType.appleSpeech.rawValue
     ]
 
     static func currentASRProviderRawValue() -> String {
@@ -705,7 +705,7 @@ class VoiceInputManager: NSObject {
         AppLog.log("[SmartVoiceIn] Post-processing text started")
         let callback = onResult
         if let llmTextOptimizer {
-            AppLog.log("[SmartVoiceIn] Running LLM text optimization...")
+            AppLog.log("[SmartVoiceIn] Running LLM text optimization with \(llmTextOptimizer.providerLogDescription())...")
             onStatusUpdate?("正在转换中（LLM 文本优化）...")
             llmTextOptimizer.optimize(text: text) { result in
                 switch result {
