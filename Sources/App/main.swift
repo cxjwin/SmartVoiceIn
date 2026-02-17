@@ -90,12 +90,23 @@ final class StatusHUD {
     }
 }
 
+private final class FlippedContentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private struct ASRProviderPresentation {
         let displayName: String
         let badge: String
+    }
+
+    private struct DownloadedModelEntry {
+        let sourceName: String
+        let modelName: String
+        let directoryURL: URL
+        let rootDirectoryURL: URL
     }
 
     private enum PromptTemplateEditorMode {
@@ -117,6 +128,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKeyCaptureMonitor: Any?
     private var hotKeyCapturePressedKeyCodes = Set<UInt16>()
     private var hotKeyCapturedKeyCodes: [UInt16] = HotKeyManager.defaultShortcutKeyCodes
+    private var settingsWindow: NSWindow?
+    private var settingsHotKeyStatusLabel: NSTextField?
+    private var settingsQwenModelStatusLabel: NSTextField?
+    private var settingsLocalLLMStatusLabel: NSTextField?
+    private var settingsTencentCredentialStatusLabel: NSTextField?
+    private var settingsMiniMaxCredentialStatusLabel: NSTextField?
+    private var settingsDownloadedModelsStatusLabel: NSTextField?
+    private var downloadedModelsPanel: NSPanel?
+    private var downloadedModelsSummaryLabel: NSTextField?
+    private var downloadedModelsListStackView: NSStackView?
 
     private var asrProviderMenuItems: [String: NSMenuItem] = [:]
     private var qwen3ASRModelStatusItem: NSMenuItem?
@@ -194,13 +215,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let currentHotKeyMenuItem {
             menu.addItem(currentHotKeyMenuItem)
         }
-        let hotKeyConfigItem = NSMenuItem(title: "设置快捷键...", action: #selector(openHotKeyConfiguration), keyEquivalent: "")
-        hotKeyConfigItem.target = self
-        menu.addItem(hotKeyConfigItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(makeASRProviderMenuItem())
         menu.addItem(NSMenuItem.separator())
         menu.addItem(makeTextOptimizeProviderMenuItem())
+        menu.addItem(NSMenuItem.separator())
+        let settingsItem = NSMenuItem(title: "设置...", action: #selector(openSettingsWindow), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "q"))
 
@@ -294,6 +316,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.title = badge
             button.toolTip = "SmartVoiceIn - 当前引擎: \(displayName)"
         }
+        refreshSettingsSummaryUI()
     }
 
     @objc private func selectQwen3Provider() {
@@ -487,6 +510,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let miniMaxConfigured = voiceInputManager?.hasMiniMaxAPIKeyConfigured() ?? false
         miniMaxCredentialStatusItem?.title = miniMaxConfigured ? "MiniMax Key: 已配置" : "MiniMax Key: 未配置"
         refreshASRProviderUI()
+        refreshSettingsSummaryUI()
     }
 
     @objc private func selectTextOptimizeProvider(_ sender: NSMenuItem) {
@@ -780,7 +804,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "保存并应用")
         alert.addButton(withTitle: "取消")
 
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 128))
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 620, height: 128))
         accessory.translatesAutoresizingMaskIntoConstraints = false
 
         let secretIdLabel = NSTextField(labelWithString: "SecretId")
@@ -802,6 +826,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         accessory.addSubview(secretKeyField)
 
         NSLayoutConstraint.activate([
+            accessory.widthAnchor.constraint(equalToConstant: 620),
             secretIdLabel.topAnchor.constraint(equalTo: accessory.topAnchor),
             secretIdLabel.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
             secretIdLabel.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
@@ -809,6 +834,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             secretIdField.topAnchor.constraint(equalTo: secretIdLabel.bottomAnchor, constant: 6),
             secretIdField.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
             secretIdField.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+            secretIdField.widthAnchor.constraint(equalToConstant: 620),
 
             secretKeyLabel.topAnchor.constraint(equalTo: secretIdField.bottomAnchor, constant: 10),
             secretKeyLabel.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
@@ -817,6 +843,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             secretKeyField.topAnchor.constraint(equalTo: secretKeyLabel.bottomAnchor, constant: 6),
             secretKeyField.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
             secretKeyField.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+            secretKeyField.widthAnchor.constraint(equalToConstant: 620),
             secretKeyField.bottomAnchor.constraint(equalTo: accessory.bottomAnchor)
         ])
 
@@ -861,7 +888,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "保存并应用")
         alert.addButton(withTitle: "取消")
 
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 72))
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 620, height: 72))
         accessory.translatesAutoresizingMaskIntoConstraints = false
 
         let apiKeyLabel = NSTextField(labelWithString: "API Key")
@@ -874,6 +901,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         accessory.addSubview(apiKeyField)
 
         NSLayoutConstraint.activate([
+            accessory.widthAnchor.constraint(equalToConstant: 620),
             apiKeyLabel.topAnchor.constraint(equalTo: accessory.topAnchor),
             apiKeyLabel.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
             apiKeyLabel.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
@@ -881,6 +909,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             apiKeyField.topAnchor.constraint(equalTo: apiKeyLabel.bottomAnchor, constant: 6),
             apiKeyField.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
             apiKeyField.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+            apiKeyField.widthAnchor.constraint(equalToConstant: 620),
             apiKeyField.bottomAnchor.constraint(equalTo: accessory.bottomAnchor)
         ])
 
@@ -1036,6 +1065,607 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatus("Qwen3 模型已保存并应用: \(appliedModelID)")
     }
 
+    @objc private func openSettingsWindow() {
+        guard voiceInputManager != nil else {
+            updateStatus("配置未就绪，请稍后重试")
+            return
+        }
+
+        if settingsWindow == nil {
+            settingsWindow = buildSettingsWindow()
+        }
+        refreshSettingsSummaryUI()
+
+        guard let settingsWindow else {
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow.center()
+        settingsWindow.makeKeyAndOrderFront(nil)
+    }
+
+    private func buildSettingsWindow() -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 680, height: 560),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "设置"
+        window.isReleasedWhenClosed = false
+
+        let contentView = NSView()
+        window.contentView = contentView
+
+        let rootStack = NSStackView()
+        rootStack.orientation = .vertical
+        rootStack.alignment = .leading
+        rootStack.spacing = 18
+        rootStack.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(rootStack)
+
+        let hotKeyTitle = NSTextField(labelWithString: "快捷键")
+        hotKeyTitle.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        rootStack.addArrangedSubview(hotKeyTitle)
+
+        let hotKeyStatus = NSTextField(labelWithString: "")
+        hotKeyStatus.textColor = .secondaryLabelColor
+        settingsHotKeyStatusLabel = hotKeyStatus
+        rootStack.addArrangedSubview(hotKeyStatus)
+
+        let hotKeyButtons = NSStackView()
+        hotKeyButtons.orientation = .horizontal
+        hotKeyButtons.spacing = 10
+        let setHotKeyButton = NSButton(title: "设置快捷键...", target: self, action: #selector(openHotKeyConfiguration))
+        let resetHotKeyButton = NSButton(title: "恢复默认（右 Command）", target: self, action: #selector(resetHotKeyToDefaultFromSettings))
+        hotKeyButtons.addArrangedSubview(setHotKeyButton)
+        hotKeyButtons.addArrangedSubview(resetHotKeyButton)
+        rootStack.addArrangedSubview(hotKeyButtons)
+
+        let divider1 = NSBox()
+        divider1.boxType = .separator
+        divider1.translatesAutoresizingMaskIntoConstraints = false
+        divider1.widthAnchor.constraint(equalToConstant: 620).isActive = true
+        rootStack.addArrangedSubview(divider1)
+
+        let asrTitle = NSTextField(labelWithString: "ASR（语音识别）")
+        asrTitle.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        rootStack.addArrangedSubview(asrTitle)
+
+        let qwenStatus = NSTextField(labelWithString: "")
+        qwenStatus.textColor = .secondaryLabelColor
+        settingsQwenModelStatusLabel = qwenStatus
+        rootStack.addArrangedSubview(qwenStatus)
+
+        let setQwenModelButton = NSButton(title: "设置 Qwen3 模型...", target: self, action: #selector(openQwen3ASRModelConfiguration))
+        rootStack.addArrangedSubview(setQwenModelButton)
+
+        let asrHint = NSTextField(labelWithString: "首次切换大模型会自动下载并预加载，进度会显示在状态 panel。")
+        asrHint.textColor = .tertiaryLabelColor
+        rootStack.addArrangedSubview(asrHint)
+
+        let divider2 = NSBox()
+        divider2.boxType = .separator
+        divider2.translatesAutoresizingMaskIntoConstraints = false
+        divider2.widthAnchor.constraint(equalToConstant: 620).isActive = true
+        rootStack.addArrangedSubview(divider2)
+
+        let llmTitle = NSTextField(labelWithString: "LLM 文本优化")
+        llmTitle.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        rootStack.addArrangedSubview(llmTitle)
+
+        let localModelStatus = NSTextField(labelWithString: "")
+        localModelStatus.textColor = .secondaryLabelColor
+        settingsLocalLLMStatusLabel = localModelStatus
+        rootStack.addArrangedSubview(localModelStatus)
+
+        let tencentStatus = NSTextField(labelWithString: "")
+        tencentStatus.textColor = .secondaryLabelColor
+        settingsTencentCredentialStatusLabel = tencentStatus
+        rootStack.addArrangedSubview(tencentStatus)
+
+        let minimaxStatus = NSTextField(labelWithString: "")
+        minimaxStatus.textColor = .secondaryLabelColor
+        settingsMiniMaxCredentialStatusLabel = minimaxStatus
+        rootStack.addArrangedSubview(minimaxStatus)
+
+        let llmButtons = NSStackView()
+        llmButtons.orientation = .horizontal
+        llmButtons.spacing = 10
+        llmButtons.addArrangedSubview(NSButton(title: "设置本地 LLM 模型...", target: self, action: #selector(openLocalLLMModelConfiguration)))
+        llmButtons.addArrangedSubview(NSButton(title: "设置腾讯云密钥...", target: self, action: #selector(openTencentCredentialConfiguration)))
+        llmButtons.addArrangedSubview(NSButton(title: "设置 MiniMax Key...", target: self, action: #selector(openMiniMaxCredentialConfiguration)))
+        rootStack.addArrangedSubview(llmButtons)
+
+        let divider3 = NSBox()
+        divider3.boxType = .separator
+        divider3.translatesAutoresizingMaskIntoConstraints = false
+        divider3.widthAnchor.constraint(equalToConstant: 620).isActive = true
+        rootStack.addArrangedSubview(divider3)
+
+        let modelStorageTitle = NSTextField(labelWithString: "模型缓存管理")
+        modelStorageTitle.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        rootStack.addArrangedSubview(modelStorageTitle)
+
+        let modelStorageStatus = NSTextField(labelWithString: "")
+        modelStorageStatus.textColor = .secondaryLabelColor
+        settingsDownloadedModelsStatusLabel = modelStorageStatus
+        rootStack.addArrangedSubview(modelStorageStatus)
+
+        let modelStorageButtons = NSStackView()
+        modelStorageButtons.orientation = .horizontal
+        modelStorageButtons.spacing = 10
+        modelStorageButtons.addArrangedSubview(NSButton(title: "管理已下载模型...", target: self, action: #selector(showDownloadedModelDirectories)))
+        rootStack.addArrangedSubview(modelStorageButtons)
+
+        let modelStorageHint = NSTextField(labelWithString: "删除会直接移除磁盘中的模型文件，后续再次使用会自动重新下载。")
+        modelStorageHint.textColor = .tertiaryLabelColor
+        rootStack.addArrangedSubview(modelStorageHint)
+
+        NSLayoutConstraint.activate([
+            rootStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
+            rootStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            rootStack.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -20),
+            rootStack.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -20)
+        ])
+
+        return window
+    }
+
+    @objc private func resetHotKeyToDefaultFromSettings() {
+        hotKeyManager.resetToDefaultShortcut()
+        refreshHotKeyMenuState()
+        updateStatus("快捷键已恢复默认: \(hotKeyManager.currentShortcutDisplayName())")
+    }
+
+    private func refreshSettingsSummaryUI() {
+        settingsHotKeyStatusLabel?.stringValue = "当前快捷键: \(hotKeyManager?.currentShortcutDisplayName() ?? HotKeyManager.formatShortcutDisplayName(keyCodes: HotKeyManager.defaultShortcutKeyCodes))"
+        settingsQwenModelStatusLabel?.stringValue = "Qwen3 模型: \(voiceInputManager?.currentQwen3ASRModelIDValue() ?? Qwen3ASRProvider.defaultModelID)"
+        settingsLocalLLMStatusLabel?.stringValue = "本地 LLM 模型: \(voiceInputManager?.currentLocalLLMModelIDValue() ?? "mlx-community/Qwen2.5-0.5B-Instruct-4bit")"
+        settingsTencentCredentialStatusLabel?.stringValue = "腾讯云密钥: \((voiceInputManager?.hasTencentCredentialsConfigured() ?? false) ? "已配置" : "未配置")"
+        settingsMiniMaxCredentialStatusLabel?.stringValue = "MiniMax Key: \((voiceInputManager?.hasMiniMaxAPIKeyConfigured() ?? false) ? "已配置" : "未配置")"
+        refreshDownloadedModelStatusLabelIfNeeded()
+    }
+
+    private func refreshDownloadedModelStatusLabelIfNeeded() {
+        guard let settingsDownloadedModelsStatusLabel else {
+            return
+        }
+
+        let entries = downloadedModelEntries()
+        if entries.isEmpty {
+            settingsDownloadedModelsStatusLabel.stringValue = "已下载模型: 0 个"
+            return
+        }
+
+        let qwenCount = entries.filter { $0.sourceName == "Qwen3 ASR" }.count
+        let localCount = entries.filter { $0.sourceName == "本地 LLM" }.count
+        settingsDownloadedModelsStatusLabel.stringValue = "已下载模型: \(entries.count) 个（Qwen3 ASR: \(qwenCount)，本地 LLM: \(localCount)）"
+    }
+
+    private func downloadedModelEntries() -> [DownloadedModelEntry] {
+        var entries: [DownloadedModelEntry] = []
+        entries.append(contentsOf: discoverQwen3DownloadedModelEntries())
+        entries.append(contentsOf: discoverLocalLLMDownloadedModelEntries())
+
+        var uniqueByPath: [String: DownloadedModelEntry] = [:]
+        for entry in entries {
+            uniqueByPath[entry.directoryURL.standardizedFileURL.path] = entry
+        }
+        return uniqueByPath.values.sorted { $0.directoryURL.path < $1.directoryURL.path }
+    }
+
+    private func discoverQwen3DownloadedModelEntries() -> [DownloadedModelEntry] {
+        let root = qwen3ModelCacheRootDirectoryURL()
+        let fileManager = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return []
+        }
+
+        guard let children = try? fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        return children.compactMap { child in
+            var childIsDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: child.path, isDirectory: &childIsDirectory), childIsDirectory.boolValue else {
+                return nil
+            }
+            guard looksLikeModelDirectory(child) else {
+                return nil
+            }
+            return DownloadedModelEntry(
+                sourceName: "Qwen3 ASR",
+                modelName: child.lastPathComponent,
+                directoryURL: child,
+                rootDirectoryURL: root
+            )
+        }
+    }
+
+    private func discoverLocalLLMDownloadedModelEntries() -> [DownloadedModelEntry] {
+        let root = localLLMModelCacheRootDirectoryURL()
+        let fileManager = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return []
+        }
+
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return []
+        }
+
+        var entries: [DownloadedModelEntry] = []
+        while let next = enumerator.nextObject() as? URL {
+            var candidateIsDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: next.path, isDirectory: &candidateIsDirectory), candidateIsDirectory.boolValue else {
+                continue
+            }
+            guard looksLikeModelDirectory(next) else {
+                continue
+            }
+
+            let modelName = relativePath(of: next, under: root)
+            entries.append(
+                DownloadedModelEntry(
+                    sourceName: "本地 LLM",
+                    modelName: modelName,
+                    directoryURL: next,
+                    rootDirectoryURL: root
+                )
+            )
+            enumerator.skipDescendants()
+        }
+
+        return entries
+    }
+
+    private func looksLikeModelDirectory(_ directoryURL: URL) -> Bool {
+        let fileManager = FileManager.default
+        guard let children = try? fileManager.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return false
+        }
+
+        var hasWeightFile = false
+        var hasConfigFile = false
+        for child in children {
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: child.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+                continue
+            }
+            let fileName = child.lastPathComponent.lowercased()
+            if fileName == "config.json" || fileName == "tokenizer.json" {
+                hasConfigFile = true
+            }
+            if fileName.hasSuffix(".safetensors") || fileName.hasSuffix(".gguf") {
+                hasWeightFile = true
+            }
+        }
+        return hasWeightFile || hasConfigFile
+    }
+
+    private func qwen3ModelCacheRootDirectoryURL() -> URL {
+        let environment = ProcessInfo.processInfo.environment
+        if let overridePath = environment["QWEN3_CACHE_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !overridePath.isEmpty {
+            return URL(fileURLWithPath: NSString(string: overridePath).expandingTildeInPath, isDirectory: true)
+                .appendingPathComponent("qwen3-speech", isDirectory: true)
+        }
+        if let overridePath = environment["QWEN3_ASR_CACHE_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !overridePath.isEmpty {
+            return URL(fileURLWithPath: NSString(string: overridePath).expandingTildeInPath, isDirectory: true)
+                .appendingPathComponent("qwen3-speech", isDirectory: true)
+        }
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        return base.appendingPathComponent("qwen3-speech", isDirectory: true)
+    }
+
+    private func localLLMModelCacheRootDirectoryURL() -> URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        return base.appendingPathComponent("models", isDirectory: true)
+    }
+
+    private func relativePath(of directoryURL: URL, under rootURL: URL) -> String {
+        let rootPath = rootURL.standardizedFileURL.path
+        let fullPath = directoryURL.standardizedFileURL.path
+        let prefix = rootPath.hasSuffix("/") ? rootPath : "\(rootPath)/"
+        guard fullPath.hasPrefix(prefix) else {
+            return directoryURL.lastPathComponent
+        }
+        return String(fullPath.dropFirst(prefix.count))
+    }
+
+    @objc private func showDownloadedModelDirectories() {
+        if downloadedModelsPanel == nil {
+            downloadedModelsPanel = buildDownloadedModelsPanel()
+        }
+        reloadDownloadedModelsPanelContent()
+
+        guard let downloadedModelsPanel else {
+            return
+        }
+
+        hotKeyManager?.setEnabled(false)
+        NSApp.activate(ignoringOtherApps: true)
+        downloadedModelsPanel.center()
+        downloadedModelsPanel.makeKeyAndOrderFront(nil)
+    }
+
+    private func buildDownloadedModelsPanel() -> NSPanel {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 460),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "已下载模型目录"
+        panel.isReleasedWhenClosed = false
+        panel.delegate = self
+
+        let contentView = NSView()
+        panel.contentView = contentView
+
+        let titleLabel = NSTextField(labelWithString: "共发现 0 个模型目录：")
+        titleLabel.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(titleLabel)
+        downloadedModelsSummaryLabel = titleLabel
+
+        let scrollView = NSScrollView()
+        scrollView.borderType = .bezelBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(scrollView)
+
+        let documentView = FlippedContentView()
+        documentView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = documentView
+
+        let listStack = NSStackView()
+        listStack.orientation = .vertical
+        listStack.alignment = .leading
+        listStack.spacing = 10
+        listStack.translatesAutoresizingMaskIntoConstraints = false
+        documentView.addSubview(listStack)
+        downloadedModelsListStackView = listStack
+
+        let bottomButtons = NSStackView()
+        bottomButtons.orientation = .horizontal
+        bottomButtons.spacing = 10
+        bottomButtons.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(bottomButtons)
+
+        let refreshButton = NSButton(title: "刷新", target: self, action: #selector(refreshDownloadedModelsPanel))
+        let closeButton = NSButton(title: "关闭", target: self, action: #selector(closeDownloadedModelsPanel))
+        closeButton.keyEquivalent = "\u{1b}"
+        bottomButtons.addArrangedSubview(refreshButton)
+        bottomButtons.addArrangedSubview(closeButton)
+
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
+            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -16),
+
+            scrollView.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 10),
+            scrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            scrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            scrollView.bottomAnchor.constraint(equalTo: bottomButtons.topAnchor, constant: -12),
+
+            bottomButtons.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            bottomButtons.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -14),
+
+            listStack.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 10),
+            listStack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: 10),
+            listStack.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -10),
+            listStack.bottomAnchor.constraint(lessThanOrEqualTo: documentView.bottomAnchor, constant: -10),
+            listStack.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor, constant: -20),
+
+            documentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            documentView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            documentView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+            documentView.bottomAnchor.constraint(equalTo: scrollView.contentView.bottomAnchor),
+            documentView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+            documentView.heightAnchor.constraint(greaterThanOrEqualTo: scrollView.contentView.heightAnchor)
+        ])
+
+        return panel
+    }
+
+    @objc private func refreshDownloadedModelsPanel() {
+        reloadDownloadedModelsPanelContent()
+    }
+
+    private func reloadDownloadedModelsPanelContent() {
+        let entries = downloadedModelEntries()
+        downloadedModelsSummaryLabel?.stringValue = "共发现 \(entries.count) 个模型目录："
+
+        guard let downloadedModelsListStackView else {
+            refreshDownloadedModelStatusLabelIfNeeded()
+            return
+        }
+
+        downloadedModelsListStackView.arrangedSubviews.forEach {
+            downloadedModelsListStackView.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+
+        if entries.isEmpty {
+            let emptyLabel = NSTextField(labelWithString: "暂无已下载模型")
+            emptyLabel.textColor = .secondaryLabelColor
+            downloadedModelsListStackView.addArrangedSubview(emptyLabel)
+            refreshDownloadedModelStatusLabelIfNeeded()
+            return
+        }
+
+        for (index, entry) in entries.enumerated() {
+            downloadedModelsListStackView.addArrangedSubview(modelRowView(entry: entry, index: index + 1))
+        }
+        refreshDownloadedModelStatusLabelIfNeeded()
+    }
+
+    private func modelRowView(entry: DownloadedModelEntry, index: Int) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let topRow = NSStackView()
+        topRow.orientation = .horizontal
+        topRow.alignment = .centerY
+        topRow.spacing = 8
+        topRow.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(topRow)
+
+        let title = NSTextField(labelWithString: "\(index). [\(entry.sourceName)] \(entry.modelName)")
+        title.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        title.lineBreakMode = .byTruncatingTail
+        title.toolTip = entry.directoryURL.path
+        topRow.addArrangedSubview(title)
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        topRow.addArrangedSubview(spacer)
+
+        let viewButton = NSButton(title: "查看", target: self, action: #selector(viewDownloadedModelEntry(_:)))
+        viewButton.setButtonType(.momentaryPushIn)
+        viewButton.bezelStyle = .rounded
+        viewButton.toolTip = entry.directoryURL.path
+        topRow.addArrangedSubview(viewButton)
+
+        let deleteButton = NSButton(title: "删除", target: self, action: #selector(deleteDownloadedModelEntry(_:)))
+        deleteButton.setButtonType(.momentaryPushIn)
+        deleteButton.bezelStyle = .rounded
+        deleteButton.toolTip = entry.directoryURL.path
+        topRow.addArrangedSubview(deleteButton)
+
+        let pathLabel = NSTextField(labelWithString: entry.directoryURL.path)
+        pathLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        pathLabel.textColor = .secondaryLabelColor
+        pathLabel.lineBreakMode = .byTruncatingMiddle
+        pathLabel.translatesAutoresizingMaskIntoConstraints = false
+        pathLabel.toolTip = entry.directoryURL.path
+        container.addSubview(pathLabel)
+
+        let divider = NSBox()
+        divider.boxType = .separator
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(divider)
+
+        NSLayoutConstraint.activate([
+            topRow.topAnchor.constraint(equalTo: container.topAnchor),
+            topRow.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            topRow.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+
+            spacer.widthAnchor.constraint(greaterThanOrEqualToConstant: 6),
+
+            pathLabel.topAnchor.constraint(equalTo: topRow.bottomAnchor, constant: 4),
+            pathLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            pathLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+
+            divider.topAnchor.constraint(equalTo: pathLabel.bottomAnchor, constant: 8),
+            divider.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            divider.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            divider.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            divider.heightAnchor.constraint(equalToConstant: 1)
+        ])
+
+        return container
+    }
+
+    private func downloadedModelEntry(forPath path: String) -> DownloadedModelEntry? {
+        let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        return downloadedModelEntries().first { $0.directoryURL.standardizedFileURL.path == normalizedPath }
+    }
+
+    @objc private func viewDownloadedModelEntry(_ sender: NSButton) {
+        guard let path = sender.toolTip else {
+            return
+        }
+        let url = URL(fileURLWithPath: path)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            reloadDownloadedModelsPanelContent()
+            updateStatus("模型目录不存在，已刷新列表")
+            return
+        }
+
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+        updateStatus("已定位模型目录: \(url.lastPathComponent)")
+    }
+
+    @objc private func deleteDownloadedModelEntry(_ sender: NSButton) {
+        guard let path = sender.toolTip,
+              let entry = downloadedModelEntry(forPath: path) else {
+            reloadDownloadedModelsPanelContent()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "删除模型文件"
+        alert.informativeText = "确认删除「\(entry.modelName)」？\n\n\(entry.directoryURL.path)\n\n此操作不可恢复。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+
+        let modal = alert.runModal()
+        guard modal == .alertFirstButtonReturn else {
+            return
+        }
+
+        do {
+            try FileManager.default.removeItem(at: entry.directoryURL)
+            removeEmptyParentDirectories(
+                startAt: entry.directoryURL.deletingLastPathComponent(),
+                stopAt: entry.rootDirectoryURL
+            )
+            reloadDownloadedModelsPanelContent()
+            updateStatus("已删除模型: \(entry.modelName)")
+        } catch {
+            updateStatus("删除失败: \(entry.modelName)")
+            let failureAlert = NSAlert()
+            failureAlert.messageText = "删除失败"
+            failureAlert.informativeText = error.localizedDescription
+            failureAlert.alertStyle = .warning
+            failureAlert.addButton(withTitle: "确定")
+            _ = failureAlert.runModal()
+        }
+    }
+
+    @objc private func closeDownloadedModelsPanel() {
+        downloadedModelsPanel?.close()
+    }
+
+    private func removeEmptyParentDirectories(startAt directoryURL: URL, stopAt rootURL: URL) {
+        let fileManager = FileManager.default
+        let rootPath = rootURL.standardizedFileURL.path
+        let rootPrefix = rootPath.hasSuffix("/") ? rootPath : "\(rootPath)/"
+        var cursor = directoryURL.standardizedFileURL
+
+        while cursor.path.hasPrefix(rootPrefix), cursor.path != rootPath {
+            guard let items = try? fileManager.contentsOfDirectory(atPath: cursor.path), items.isEmpty else {
+                return
+            }
+            do {
+                try fileManager.removeItem(at: cursor)
+            } catch {
+                return
+            }
+            cursor = cursor.deletingLastPathComponent().standardizedFileURL
+        }
+    }
+
     private func setupHotKey() {
         hotKeyManager = HotKeyManager { [weak self] in
             self?.toggleRecording()
@@ -1048,6 +1678,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ?? HotKeyManager.formatShortcutDisplayName(keyCodes: HotKeyManager.defaultShortcutKeyCodes)
         hotKeyInstructionMenuItem?.title = "按 \(displayName) 开始/停止录音"
         currentHotKeyMenuItem?.title = "当前快捷键: \(displayName)"
+        refreshSettingsSummaryUI()
     }
 
     @objc private func openHotKeyConfiguration() {
@@ -1482,6 +2113,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         return nil
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else {
+            return
+        }
+        if window === downloadedModelsPanel {
+            hotKeyManager?.setEnabled(true)
+        }
     }
 
     @objc private func quitApp() {
