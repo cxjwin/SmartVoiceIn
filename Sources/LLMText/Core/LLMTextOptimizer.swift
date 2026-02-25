@@ -228,7 +228,37 @@ final class LLMTextOptimizer: @unchecked Sendable {
             options: .regularExpression
         ).trimmingCharacters(in: .whitespacesAndNewlines)
 
-        return unwrapped
+        return stripASRTextWrapperArtifacts(from: unwrapped)
+    }
+
+    private func stripASRTextWrapperArtifacts(from text: String) -> String {
+        var candidate = text
+
+        // Some models may echo prompt wrappers like <asr_text>...</asr_text>.
+        let blockPattern = #"(?is)<asr_text>\s*(.*?)\s*</asr_text>"#
+        if let regex = try? NSRegularExpression(pattern: blockPattern),
+           let match = regex.firstMatch(
+               in: candidate,
+               options: [],
+               range: NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
+           ),
+           match.numberOfRanges > 1,
+           let innerRange = Range(match.range(at: 1), in: candidate) {
+            candidate = String(candidate[innerRange])
+        }
+
+        candidate = candidate.replacingOccurrences(
+            of: #"(?i)</?asr_text>"#,
+            with: "",
+            options: .regularExpression
+        )
+        candidate = candidate.replacingOccurrences(
+            of: #"(?i)&lt;/?asr_text&gt;"#,
+            with: "",
+            options: .regularExpression
+        )
+
+        return candidate.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func shouldFallbackToOriginal(input: String, output: String) -> Bool {
