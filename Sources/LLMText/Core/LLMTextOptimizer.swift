@@ -181,6 +181,21 @@ final class LLMTextOptimizer: @unchecked Sendable {
                     completion(.success(cleanedInput))
                     return
                 }
+                if self.losesCriticalContext(input: cleanedInput, output: normalized) {
+                    AppLog.log("[LLMTextOptimizer] Output loses critical context, fallback to original text")
+                    completion(.success(cleanedInput))
+                    return
+                }
+                if self.losesQuestionIntent(input: cleanedInput, output: normalized) {
+                    AppLog.log("[LLMTextOptimizer] Output loses question intent, fallback to original text")
+                    completion(.success(cleanedInput))
+                    return
+                }
+                if self.isLikelyOverRephrased(input: cleanedInput, output: normalized) {
+                    AppLog.log("[LLMTextOptimizer] Output is over-rephrased for clean short input, fallback to original text")
+                    completion(.success(cleanedInput))
+                    return
+                }
                 completion(.success(normalized))
             case .failure(let error):
                 completion(.failure(error))
@@ -285,6 +300,39 @@ final class LLMTextOptimizer: @unchecked Sendable {
         return false
     }
 
+    private func losesCriticalContext(input: String, output: String) -> Bool {
+        let inputCoreCount = coreCharacterCount(in: input)
+        let outputCoreCount = coreCharacterCount(in: output)
+        guard inputCoreCount >= 16, outputCoreCount > 0 else {
+            return false
+        }
+
+        let compressionRatio = Double(outputCoreCount) / Double(inputCoreCount)
+        guard compressionRatio < 0.85 else {
+            return false
+        }
+
+        guard let firstClause = firstMeaningfulClause(in: input) else {
+            return false
+        }
+
+        let anchors = extractAnchors(from: firstClause)
+        guard !anchors.isEmpty else {
+            return false
+        }
+
+        let coveredAnchorCount = anchors.reduce(into: 0) { partial, anchor in
+            if output.contains(anchor) {
+                partial += 1
+            }
+        }
+        if coveredAnchorCount > 0 {
+            return false
+        }
+
+        return containsCriticalConnector(in: firstClause)
+    }
+
     private func isLikelyModelRefusal(output: String, input: String) -> Bool {
         let normalizedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalizedOutput.isEmpty else {
@@ -334,6 +382,167 @@ final class LLMTextOptimizer: @unchecked Sendable {
         ]
         fillerTerms.forEach { candidate = candidate.replacingOccurrences(of: $0, with: "") }
         return coreCharacterCount(in: candidate) == 0
+    }
+
+    private func firstMeaningfulClause(in text: String) -> String? {
+        let separators = CharacterSet(charactersIn: "，。！？；,!?;")
+        let parts = text.components(separatedBy: separators)
+        for rawPart in parts {
+            let cleaned = stripFillerTerms(in: rawPart)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if coreCharacterCount(in: cleaned) >= 8 {
+                return cleaned
+            }
+        }
+        return nil
+    }
+
+    private func extractAnchors(from text: String) -> [String] {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            return []
+        }
+        guard let regex = try? NSRegularExpression(pattern: #"[A-Za-z0-9]{2,}|[\p{Han}]{2,}"#, options: []) else {
+            return []
+        }
+
+        let stopwords: Set<String> = [
+            "因为", "所以", "如果", "虽然", "但是", "不过", "另外", "同时",
+            "就是", "这个", "那个", "我们", "你们", "他们", "一个", "一些",
+            "可以", "需要", "进行", "通过", "然后", "还有"
+        ]
+
+        let nsRange = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        var anchors: [String] = []
+        for match in regex.matches(in: normalized, options: [], range: nsRange) {
+            guard let range = Range(match.range, in: normalized) else {
+                continue
+            }
+            let token = String(normalized[range])
+            if stopwords.contains(token) {
+                continue
+            }
+            anchors.append(token)
+        }
+
+        if anchors.isEmpty {
+            return []
+        }
+        let unique = Array(Set(anchors))
+        return unique.sorted { $0.count > $1.count }.prefix(3).map { $0 }
+    }
+
+    private func stripFillerTerms(in text: String) -> String {
+        var candidate = text
+        let fillerTerms = [
+            "嗯", "呃", "啊", "额", "哦", "唉", "诶", "那个", "这个",
+            "就是", "然后", "的话", "吧", "呀", "嘛"
+        ]
+        fillerTerms.forEach { candidate = candidate.replacingOccurrences(of: $0, with: "") }
+        return candidate
+    }
+
+    private func containsCriticalConnector(in text: String) -> Bool {
+        let markers = ["因为", "由于", "如果", "虽然", "但是", "不过", "另外", "同时"]
+        return markers.contains { text.contains($0) }
+    }
+
+    private func losesQuestionIntent(input: String, output: String) -> Bool {
+        return hasQuestionIntent(in: input) && !hasQuestionIntent(in: output)
+    }
+
+    private func hasQuestionIntent(in text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            return false
+        }
+
+        if normalized.contains("?") || normalized.contains("？") {
+            return true
+        }
+
+        let markers = [
+            "吗", "么", "呢", "为何", "为什么", "是否", "是不是",
+            "哪", "哪些", "哪一些", "如何", "怎么", "怎样", "多少", "几"
+        ]
+        return markers.contains { normalized.contains($0) }
+    }
+
+    private func isLikelyOverRephrased(input: String, output: String) -> Bool {
+        let inputCoreCount = coreCharacterCount(in: input)
+        guard inputCoreCount >= 8, inputCoreCount <= 32 else {
+            return false
+        }
+        guard !hasHeavyCleanupSignals(in: input) else {
+            return false
+        }
+
+        let inputComparable = canonicalComparableText(input)
+        let outputComparable = canonicalComparableText(output)
+        guard !inputComparable.isEmpty, !outputComparable.isEmpty else {
+            return false
+        }
+        guard inputComparable != outputComparable else {
+            return false
+        }
+
+        let similarity = lcsSimilarity(lhs: inputComparable, rhs: outputComparable)
+        return similarity < 0.72
+    }
+
+    private func hasHeavyCleanupSignals(in text: String) -> Bool {
+        let fillerTerms = ["嗯", "呃", "啊", "额", "哦", "唉", "诶", "那个", "就是", "然后", "的话"]
+        if fillerTerms.contains(where: { text.contains($0) }) {
+            return true
+        }
+
+        if text.range(of: #"[，。！？；][，。！？；]"#, options: .regularExpression) != nil {
+            return true
+        }
+
+        if text.range(of: #"[A-Za-z](?:\s+[A-Za-z]){1,}"#, options: .regularExpression) != nil {
+            return true
+        }
+
+        if text.range(of: #"百分之|[零〇一二两三四五六七八九十百千万亿]点|[零〇一二两三四五六七八九十百千万亿]+\s*(个|次|版|年|月|天|小时|分钟|秒|项|条|种|倍|场景|版本)"#, options: .regularExpression) != nil {
+            return true
+        }
+
+        return false
+    }
+
+    private func canonicalComparableText(_ text: String) -> String {
+        let scalars = text.unicodeScalars.filter { scalar in
+            CharacterSet.alphanumerics.contains(scalar) || scalar.properties.isIdeographic
+        }
+        return String(String.UnicodeScalarView(scalars))
+    }
+
+    private func lcsSimilarity(lhs: String, rhs: String) -> Double {
+        let left = Array(lhs)
+        let right = Array(rhs)
+        guard !left.isEmpty, !right.isEmpty else {
+            return 0
+        }
+
+        var previous = Array(repeating: 0, count: right.count + 1)
+        var current = Array(repeating: 0, count: right.count + 1)
+
+        for i in 1...left.count {
+            current[0] = 0
+            for j in 1...right.count {
+                if left[i - 1] == right[j - 1] {
+                    current[j] = previous[j - 1] + 1
+                } else {
+                    current[j] = max(previous[j], current[j - 1])
+                }
+            }
+            swap(&previous, &current)
+        }
+
+        let lcs = previous[right.count]
+        let base = max(left.count, right.count)
+        return base == 0 ? 0 : Double(lcs) / Double(base)
     }
 
     private func coreCharacterCount(in text: String) -> Int {

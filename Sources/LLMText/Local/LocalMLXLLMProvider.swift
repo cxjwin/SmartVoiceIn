@@ -71,7 +71,7 @@ final class LocalMLXLLMProvider: LLMTextOptimizeProvider, @unchecked Sendable {
         }
         let configuredMaxTokens = Int(env["VOICEINPUT_LOCAL_LLM_MAX_TOKENS"] ?? "") ?? 160
         let maxTokens = max(64, configuredMaxTokens)
-        let configuredTemperature = Double(env["VOICEINPUT_LOCAL_LLM_TEMPERATURE"] ?? "") ?? 0.8
+        let configuredTemperature = Double(env["VOICEINPUT_LOCAL_LLM_TEMPERATURE"] ?? "") ?? 0.3
         let temperature = min(max(configuredTemperature, 0), 2)
         let configuredTopP = Double(env["VOICEINPUT_LOCAL_LLM_TOP_P"] ?? "") ?? 0.95
         let topP = min(max(configuredTopP, 0), 1)

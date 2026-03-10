@@ -100,6 +100,43 @@ xcodegen generate
 xcodebuild -project "VoiceInput.xcodeproj" -scheme "VoiceInput" -configuration Debug build
 ```
 
+也可以使用一键脚本（会自动输出 `.app` 与可执行文件路径）：
+
+```bash
+./scripts/build_app.sh
+```
+
+常用参数：
+- `--configuration Release`：构建 Release
+- `--skip-xcodegen`：跳过 `xcodegen generate`
+- `--run`：构建后直接运行可执行文件
+
+## 发布（直接分发）
+
+可使用发布脚本一键执行：`Archive -> Zip -> Notarize -> Staple -> Verify`。
+
+首次（保存 notary 凭据）：
+
+```bash
+./scripts/release.sh \
+  --team-id 543F7AK74D \
+  --store-credentials \
+  --apple-id "<你的AppleID>" \
+  --app-password "<App专用密码>"
+```
+
+后续发布：
+
+```bash
+./scripts/release.sh --team-id 543F7AK74D
+```
+
+常用参数：
+- `--notary-profile <name>`：自定义 notarytool keychain profile（默认 `smartvoicein-notary`）
+- `--sign-identity <name>`：签名证书名称（默认 `Developer ID Application`）
+- `--skip-notarize`：仅本地签名归档和打包，不提交公证
+- `--skip-verify`：跳过 `codesign/spctl` 本地验证
+
 ## App 测试执行步骤
 
 1. 启动工程并运行 App
@@ -205,6 +242,10 @@ cd /Users/smart/Desktop/demo/VoiceInput
 - 模板包含 `title` + `prompt` 两部分，支持按场景切换。
 - 内置模板当前仅保留 `基础清洗`，其余建议通过自定义模板扩展。
 - 数字规范（如 `二点五 -> 2.5`、`百分之八十 -> 80%`）默认通过模板提示词约束，不做代码硬编码替换。
+- 默认模板支持独立文件加载（无需改 Swift 代码）：
+  - 可编辑文件（自动创建）：`~/Library/Application Support/SmartVoiceIn/prompts/basic_cleanup_prompt.txt`
+  - 环境变量覆盖：`VOICEINPUT_DEFAULT_PROMPT_FILE=/your/path/prompt.txt`
+  - 内置资源文件：`Resources/Prompts/basic_cleanup_prompt.txt`
 - 模板渲染规则：
   - 如果模板包含 `{{input}}`，会先把原文替换进去，再作为单条用户消息发送给 LLM。
   - 如果模板不包含 `{{input}}`，会把模板作为 `system` 指令，原文作为 `user` 内容发送。

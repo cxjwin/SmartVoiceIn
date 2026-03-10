@@ -168,7 +168,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupVoiceInput()
         setupHotKey()
 
-        // 不再自动请求权限，用户需要手动在系统设置中授权
+        // 辅助功能权限仍需要用户在系统设置中手动授权
         AppLog.log("请在系统设置中授予权限:")
         AppLog.log("1. 系统设置 → 隐私与安全性 → 辅助功能 → 添加 SmartVoiceIn")
         AppLog.log("2. 系统设置 → 隐私与安全性 → 麦克风 → 添加 SmartVoiceIn")
@@ -1940,32 +1940,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return alert.runModal()
     }
 
-    private func requestPermissions() {
-        SFSpeechRecognizer.requestAuthorization { status in
-            DispatchQueue.main.async {
-                switch status {
-                case .authorized:
-                    self.updateMenuItem(title: "语音识别: 已授权")
-                case .denied:
-                    self.updateMenuItem(title: "语音识别: 被拒绝")
-                case .restricted:
-                    self.updateMenuItem(title: "语音识别: 限制")
-                case .notDetermined:
-                    self.updateMenuItem(title: "语音识别: 未确定")
-                @unknown default:
-                    break
-                }
-            }
-        }
-
-        AVCaptureDevice.requestAccess(for: .audio) { granted in
-            DispatchQueue.main.async {
-                if granted {
-                    self.updateMenuItem(title: "麦克风: 已授权")
-                } else {
-                    self.updateMenuItem(title: "麦克风: 被拒绝")
-                }
-            }
+    private func handleSpeechAuthorizationStatus(_ status: SFSpeechRecognizerAuthorizationStatus) {
+        switch status {
+        case .authorized:
+            updateMenuItem(title: "语音识别: 已授权")
+        case .denied:
+            updateMenuItem(title: "语音识别: 被拒绝")
+        case .restricted:
+            updateMenuItem(title: "语音识别: 限制")
+        case .notDetermined:
+            updateMenuItem(title: "语音识别: 未确定")
+        @unknown default:
+            break
         }
     }
 
@@ -1973,12 +1959,61 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if voiceInputManager.isRecording {
             voiceInputManager.stopRecording()
             updateStatus("正在识别...")
-        } else {
-            captureCurrentInputTargetApplication()
-            voiceInputManager.startRecording()
-            updateStatus("正在录音...")
+            updateIcon()
+            return
         }
-        updateIcon()
+
+        requestPermissionsForRecording { [weak self] granted in
+            guard let self else { return }
+            guard granted else {
+                self.updateStatus("麦克风权限未授权，请到系统设置开启")
+                self.updateIcon()
+                return
+            }
+
+            self.captureCurrentInputTargetApplication()
+            self.voiceInputManager.startRecording()
+            self.updateStatus("正在录音...")
+            self.updateIcon()
+        }
+    }
+
+    private nonisolated func requestPermissionsForRecording(completion: @escaping (Bool) -> Void) {
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        AppLog.log("[SmartVoiceIn] Microphone authorization status: \(micStatus.rawValue)")
+
+        switch micStatus {
+        case .authorized:
+            requestSpeechPermissionIfNeeded()
+            completion(true)
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                Task { @MainActor in
+                    guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
+                    appDelegate.updateMenuItem(title: granted ? "麦克风: 已授权" : "麦克风: 被拒绝")
+                    if granted {
+                        appDelegate.requestSpeechPermissionIfNeeded()
+                    }
+                    completion(granted)
+                }
+            }
+        case .denied, .restricted:
+            completion(false)
+        @unknown default:
+            completion(false)
+        }
+    }
+
+    private nonisolated func requestSpeechPermissionIfNeeded() {
+        guard SFSpeechRecognizer.authorizationStatus() == .notDetermined else {
+            return
+        }
+        SFSpeechRecognizer.requestAuthorization { status in
+            Task { @MainActor in
+                guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
+                appDelegate.handleSpeechAuthorizationStatus(status)
+            }
+        }
     }
 
     private func insertText(_ text: String) {

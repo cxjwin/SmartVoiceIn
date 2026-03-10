@@ -46,5 +46,8 @@ fastlane/Preview.html
 fastlane/screenshots/
 fastlane/test_output/
 
+# Secrets
+.env
+
 # Temporary / logs
 *.log
