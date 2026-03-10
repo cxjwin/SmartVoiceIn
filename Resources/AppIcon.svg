@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Full black background - macOS will clip to rounded rect -->
+  <rect width="1024" height="1024" fill="#1A1A1A"/>
+
+  <!-- Center dot -->
+  <circle cx="420" cy="512" r="32" fill="#FFFFFF"/>
+
+  <!-- Sound wave arcs - 3 layers radiating from center dot -->
+  <path d="M 490 380 A 160 160 0 0 1 490 644"
+        fill="none" stroke="#FFFFFF" stroke-width="42" stroke-linecap="round"/>
+  <path d="M 555 295 A 260 260 0 0 1 555 729"
+        fill="none" stroke="#FFFFFF" stroke-width="42" stroke-linecap="round"/>
+  <path d="M 620 218 A 355 355 0 0 1 620 806"
+        fill="none" stroke="#FFFFFF" stroke-width="42" stroke-linecap="round"/>
+</svg>

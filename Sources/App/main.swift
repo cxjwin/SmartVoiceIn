@@ -151,6 +151,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var tencentCredentialStatusItem: NSMenuItem?
     private var miniMaxCredentialStatusItem: NSMenuItem?
     private var statusHUDAutoHideWorkItem: DispatchWorkItem?
+    private var pasteboardObserverTimer: Timer?
     private let asrProviderPresentations: [String: ASRProviderPresentation] = [
         "qwen3_local": ASRProviderPresentation(displayName: "Qwen3 本地模型", badge: "Q3"),
         "apple_speech": ASRProviderPresentation(displayName: "Apple Speech", badge: "SP"),
@@ -167,6 +168,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupMenuBar()
         setupVoiceInput()
         setupHotKey()
+        updateStatus("就绪")
 
         // 辅助功能权限仍需要用户在系统设置中手动授权
         AppLog.log("请在系统设置中授予权限:")
@@ -2018,6 +2020,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func insertText(_ text: String) {
         let pasteboard = NSPasteboard.general
+
+        // 辅助功能权限未开启：复制到剪贴板并提示
+        guard AXIsProcessTrusted() else {
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+            updateStatus("已复制到剪贴板，请 ⌘V 粘贴（开启辅助功能权限可自动输入）")
+            startPasteboardObserver(changeCount: pasteboard.changeCount)
+            return
+        }
+
         let previousContents = pasteboard.string(forType: .string)
 
         pasteboard.clearContents()
@@ -2039,6 +2051,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     pasteboard.clearContents()
                     pasteboard.setString(previous, forType: .string)
                 }
+            }
+        }
+    }
+
+    /// 轮询剪贴板 changeCount，变化时（用户粘贴后复制了新内容）或 10 秒超时后隐藏 HUD
+    private func startPasteboardObserver(changeCount: Int) {
+        pasteboardObserverTimer?.invalidate()
+        let deadline = Date().addingTimeInterval(10)
+        pasteboardObserverTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            let changed = NSPasteboard.general.changeCount != changeCount
+            let timedOut = Date() >= deadline
+            if changed || timedOut {
+                timer.invalidate()
+                self.pasteboardObserverTimer = nil
+                self.statusHUD?.hide()
             }
         }
     }
@@ -2077,6 +2105,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         keyUp?.post(tap: .cghidEventTap)
     }
 
+    private static let persistKeywords = ["失败", "错误", "未授权", "未就绪", "权限",
+                                            "正在录音", "正在识别", "正在转换", "正在预加载",
+                                            "加载中"]
+
     private func updateStatus(_ status: String, autoHideAfter: TimeInterval? = nil) {
         statusHUDAutoHideWorkItem?.cancel()
         statusHUDAutoHideWorkItem = nil
@@ -2086,16 +2118,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         statusHUD?.update(status: status)
 
-        guard let autoHideAfter, autoHideAfter > 0 else {
-            return
+        let hideDelay: TimeInterval?
+        if let autoHideAfter {
+            hideDelay = autoHideAfter > 0 ? autoHideAfter : nil
+        } else {
+            let shouldPersist = Self.persistKeywords.contains { status.contains($0) }
+            hideDelay = shouldPersist ? nil : 5
         }
+
+        guard let hideDelay else { return }
 
         let workItem = DispatchWorkItem { [weak self] in
             self?.statusHUD?.hide()
             self?.statusHUDAutoHideWorkItem = nil
         }
         statusHUDAutoHideWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + autoHideAfter, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + hideDelay, execute: workItem)
     }
 
     private func updateMenuItem(title: String) {
